@@ -1,0 +1,337 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1.1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\DeclareUnicodeCharacter{03B8}{\ensuremath{\theta}}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+% Same plain Julia listing style as model_definition.tex.
+\lstdefinelanguage{Julia}{
+  keywords={abstract,type,struct,mutable,function,end,if,else,elseif,for,
+            while,begin,return,using,import,export,const,where,in,do,let,
+            quote,macro,module,true,false,nothing,missing,local,global},
+  sensitive=true,
+  morecomment=[l]{\#},
+  morestring=[b]",
+}
+\lstset{
+  language=Julia,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  commentstyle=\color{black!55}\itshape,
+  stringstyle=\color{black!70},
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  breakatwhitespace=true,
+  frame=single,
+  framerule=0.3pt,
+  xleftmargin=1em,
+  xrightmargin=1em,
+  aboveskip=0.8\baselineskip,
+  belowskip=0.8\baselineskip,
+  literate={θ}{{$\theta$}}1
+           {∂}{{$\partial$}}1
+           {≤}{{$\le$}}1
+           {≥}{{$\ge$}}1
+           {∈}{{$\in$}}1
+           {∞}{{$\infty$}}1
+           {·}{{$\cdot$}}1
+           {—}{{---}}1
+           {–}{{--}}1,
+}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Concourse: The Event Loop}
+\author{Concourse research notes}
+\date{July 17, 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%==============================================================================
+\section{What this document is}
+
+\code{model\_definition.tex}~\S8 queued four middle-layer questions. Design
+discussion on July 17, 2026 settled three and framed the fourth:
+
+\begin{description}
+\item[D1 (decided).] \code{fire} emits enable/disable/re-enable deltas; the
+  full \code{enabled(state)} recompute is retained as a debug-mode
+  consistency check, not measured against --- deltas are chosen for
+  correctness of the order of operations, not for speed.
+\item[D2 (open; proposal in \S\ref{sec:cascade}).] The cascade worklist must
+  settle to a fixed point; the policy that makes the fixed point unique is
+  proposed here and awaits a decision.
+\item[D3 (decided).] The interpreter owns the marked record. CompetingClocks
+  samples, and only samples; its watchers observe sampling, and the marked
+  record is not a sampling artifact.
+\item[D4 (decided).] Sampler choice belongs to CompetingClocks'
+  \code{SamplerBuilder}: Concourse describes the clock-key type and the
+  distributions in play, and the builder picks. Any sampler valid for those
+  distributions must work; none is load-bearing.
+\end{description}
+
+Charter claims F9--F11 (\S\ref{sec:charter}) extend the falsification
+charter of \code{model\_definition.tex}~\S7.
+
+%==============================================================================
+\section{D1: \code{fire} emits clock deltas}
+\label{sec:deltas}
+
+\subsection{Why the diff loses}
+
+Beyond ordering, an enabled-set diff is \emph{semantically blind to
+re-enablings}. When processor sharing re-evaluates every resident clock on an
+arrival, or a preemption changes which distribution a still-enabled key
+carries, the enabled set before and after the firing is identical --- the
+diff sees nothing, while the sampler must receive \code{reenable!}. Deltas
+carry information the diff cannot express. The diff survives only as the
+debug oracle for the one thing it can check: membership.
+
+\subsection{The delta vocabulary}
+
+The contract's \code{fire} is $\theta$-free and pure, so deltas cannot carry
+distributions --- only keys and operations. The interpreter derives each
+distribution from \code{clock\_distribution} at the post-firing state and
+each anchor from \code{st.te} (amendment A1):
+
+\begin{lstlisting}
+const ClockDelta = Tuple{Symbol,ClockKey}   # (:enable | :disable | :reenable, key)
+# fire returns (new_state, deltas::Vector{ClockDelta}); emission order is
+# authoritative and is applied to the sampler verbatim.
+\end{lstlisting}
+
+This is ClockGradients' existing \code{fire\_changes(model, state, key)}
+seam with the changes type made concrete (and the CD-1 time argument
+applied to it as well); \code{enabled\_update} consumes the same deltas, so
+the estimators' incremental path and the interpreter share one vocabulary.
+The fired clock itself is implicit: the interpreter calls
+\code{fire!(ctx, key, t)} before applying deltas, so \code{fire} never emits
+a delta for its own key.
+
+\subsection{The debug oracle}
+
+After every firing, debug mode asserts two things:
+
+\begin{enumerate}
+\item \emph{Membership:} \code{enabled(m, st')} equals the previous enabled
+  set plus emitted \code{:enable}s minus emitted \code{:disable}s (and the
+  fired key). This is the complete-recompute check, and it is the
+  specification --- \code{enabled} remains the meaning, deltas the
+  implementation.
+\item \emph{Anchors:} the sampler's per-clock enabling times equal
+  \code{st.te} --- the A1 invariant. This is what checks re-enablings, which
+  membership cannot see.
+\end{enumerate}
+
+\subsection{Refinement forced by F2: deltas are derived, not emitted}
+\label{sec:derived}
+
+Running charter claim F2 (add reneging touching only the family registry and
+the surface constructor) falsified D1 \emph{as first implemented}: patience
+clocks are born when a job enters a buffer and die when it leaves, and with
+deltas hand-emitted inside \code{settle!} and the family \code{fire}
+functions, adding the family would have meant threading emission code
+through every state-transition site — interpreter surgery, which is exactly
+what F2 forbids. The repair keeps D1's decision and changes its mechanism:
+
+\begin{itemize}
+\item \emph{Membership deltas are derived, not emitted.} The cascade already
+  knows which stations it touched. After the cascade, for each touched
+  station and each family, the family's per-station enabled keys are diffed
+  between the old and new states (both exist; \code{fire} is pure). A family
+  is now exactly four methods — \code{family\_station\_keys!},
+  \code{family\_law}, \code{family\_fire!}, \code{family\_memory} — and
+  clock lifecycle follows from membership alone.
+\item \emph{Locality is preserved.} The user's original argument for deltas
+  over a global diff was cost on large networks; the derived diff runs only
+  over the touched stations' clocks, so the asymptotics stand. Explicit
+  \code{:reenable} deltas remain available for the processor-sharing path
+  (phase 2), which membership cannot see.
+\item \emph{The A1 bookkeeping collapses into one place.} Enabling times and
+  banked ages are updated in the same derivation pass, driven by the diffs
+  and the per-family memory policy, instead of at every site that moves a
+  job.
+\item \emph{A correctness dividend.} A clock enabled and disabled within one
+  firing (a job dispatched and immediately preempted in the same cascade)
+  now nets out of the diff and never reaches the sampler — the GSMP has no
+  zero-duration clocks, which the emission order previously only
+  approximated by a disable/enable pair.
+\end{itemize}
+
+This is the falsification charter working as designed: the claim failed
+against the first implementation, and what survived is a better mechanism
+under the same decision. After the repair, the \code{:patience} addition
+itself changed only the registry and the surface fields, and M/M/1+M
+matches the Erlang-A birth--death form with the membership oracle running
+through every reneging cascade.
+
+%==============================================================================
+\section{D2 proposal: the cascade worklist}
+\label{sec:cascade}
+
+\subsection{The problem}
+
+Within one firing at time $t$, instantaneous consequences chain: a deposit
+triggers \code{settle!} at the destination; a departure from a full buffer
+lets a blocked upstream server transfer in, which frees that server, which
+admits from its buffer, which may unblock stations further upstream. The
+cascade must reach a fixed point --- no station can dispatch, preempt, or
+unblock --- before the sampler sees any delta. The requirement is that the
+fixed point be \emph{unique and deterministic}, because \code{fire} is the
+replayed, differentiated object.
+
+The GSPN literature has this exact problem as immediate transitions and
+vanishing markings, resolved there by priorities and weights (Zimmermann
+Ch.~5--6). The proposal below is that resolution, restated for queues.
+
+\subsection{Split contention from propagation}
+
+The order of cascade processing matters in exactly one place: when two
+consumers compete for one freed resource --- two blocked upstream servers and
+one freed buffer slot; two idle servers and one arriving job is already
+settled by the discipline's \code{select}. Everywhere else the steps merely
+propagate.
+
+\begin{description}
+\item[Contention is model semantics.] Who gets a freed slot is an observable
+  modeling choice, not an implementation detail, so it must be a declared
+  policy value on the station, parallel to the discipline:
+\begin{lstlisting}
+UnblockPolicy:
+    FCFSUnblock()          # longest-blocked first (default)
+    PriorityUnblock(by)    # by a ScalarExpr over the blocked job's marks
+    RandomUnblock()        # a recorded choice, via the A4 draw source
+\end{lstlisting}
+  \code{FCFSUnblock} needs the blocking order, so the blocked-server set in
+  \code{QueueState} is an ordered vector, not a set. \code{RandomUnblock}
+  consumes a recorded draw and so stays inside the A4 randomness census.
+\item[Propagation must be order-free.] With contention delegated to policy,
+  the claim is that the remaining cascade relation is \emph{confluent}: any
+  fair processing order reaches the same fixed point. Termination comes from
+  check C3 (acyclic blocking chains): each unblocking transfer moves a job
+  strictly downstream in the blocking DAG, so the cascade measure is
+  well-founded. Confluence plus termination give a unique normal form
+  (Newman's lemma); the worklist order is then an implementation choice, not
+  a semantic one.
+\end{description}
+
+The canonical order, so that the implementation is deterministic even if the
+confluence claim fails: a FIFO worklist of stations to settle, seeded with
+the destination station then the origin station of the firing --- the
+one-hop order \code{queue\_layers.tex}~\S3.2 fixed by fiat, generalized. A
+debug-build fuel counter bounds the cascade at (jobs + servers) steps and
+turns nontermination into an error rather than a hang.
+
+\subsection{What falsifies it}
+
+F9 in the charter: run the same trajectories with FIFO and LIFO worklists;
+\code{states\_equal} at every index or the confluence claim is dead, and the
+worklist order gets promoted into the IR's semantics the way the one-hop
+order already is. Either outcome is a result; the test is cheap.
+
+%==============================================================================
+\section{D3: the interpreter owns the record}
+
+The marked record $(k_i, t_i, a_i)$ is the primary observable of the whole
+library, and its auxiliary-draw column exists because the \emph{interpreter}
+supplies the draw source (A4) --- the sampler never sees those draws, so a
+sampler-side watcher could never capture them. The interpreter appends one
+entry per firing: the key, the time, and the draws consumed by that firing
+in consumption order. CompetingClocks' watchers remain what they are ---
+instrumentation of sampling --- and Concourse attaches none of the record
+path to them. \code{gradient\_record} gets one method, from the marked
+record type, per \code{model\_definition.tex}~\S6.
+
+One replay detail follows from record ownership: during estimation,
+\code{fire} must read firing $i$'s recorded draws, and the contract does not
+pass $i$. \code{QueueState} therefore carries a firing counter
+(\code{nfired::Int}, incremented by every \code{fire}), and the replay
+binding indexes the record with it. A pure counter in a pure state; the
+same device as \code{next\_id}.
+
+%==============================================================================
+\section{D4: the builder chooses the sampler}
+
+Concourse tells \code{SamplerBuilder} the clock-key type and lets
+CompetingClocks choose the sampler for the distributions in play; the
+default is whatever the builder decides, and Concourse hard-codes no method.
+The design consequence is a claim, not a configuration: \emph{every} sampler
+valid for the model's distribution set must produce statistically identical
+results, because the interpreter speaks only the blessed
+\code{SamplingContext} surface (\code{enable!}, \code{disable!},
+\code{reenable!}, \code{next}, \code{fire!}) and no model code reaches
+around it. Estimator-driven overrides (the carry coupling for IPA) are
+passed through as builder arguments by the estimation entry points, not
+chosen by the model.
+
+%==============================================================================
+\section{The interpreter, whole}
+
+With D1--D4 fixed, the middle layer is small enough to state completely.
+Julia-flavored pseudocode; error handling and the debug oracle elided:
+
+\begin{lstlisting}
+function simulate(m::QueueGSMP, θ, horizon, seed)
+    st  = initial_state(m)
+    ctx = SamplingContext(build(m), seed)     # D4: builder chooses
+    rec = MarkedRecord(clockkeytype(m))
+    for k in enabled(m, st)                   # initial enablings
+        enable!(ctx, k, clock_distribution(m, θ, k, st), st.te[k], 0.0)
+    end
+    while true
+        (t, key) = next(ctx, st.time)
+        (key === nothing || t > horizon) && break
+        fire!(ctx, key, t)                    # realize the winner's draw
+        draws = draw_source(ctx, key)         # A4: keyed, recording
+        st, deltas = fire_changes(m, st, key, t, draws)   # cascade inside
+        push!(rec, key, t, consumed(draws))   # D3: interpreter-owned
+        for (op, k) in deltas                 # D1: emission order verbatim
+            op === :disable  && disable!(ctx, k, t)
+            op === :enable   && enable!(ctx, k, clock_distribution(m, θ, k, st), st.te[k], t)
+            op === :reenable && reenable!(ctx, k, clock_distribution(m, θ, k, st), st.te[k], t)
+        end
+    end
+    close_record!(rec, min(horizon, st.time))
+end
+\end{lstlisting}
+
+Everything model-specific is inside \code{fire\_changes} (families,
+disciplines, kernels, the cascade); everything stochastic is inside
+\code{ctx} and \code{draws}; everything observable is \code{rec}. The loop
+itself should never grow.
+
+%==============================================================================
+\section{Charter extensions}
+\label{sec:charter}
+
+Continuing the numbering of \code{model\_definition.tex}~\S7:
+
+\begin{description}
+\item[F9 (cascade confluence).] With contention resolved by
+  \code{UnblockPolicy}, the cascade fixed point is order-independent.
+  \emph{Test:} FIFO vs.\ LIFO worklists over random finite-buffer
+  \code{:block} networks; \code{states\_equal} at every firing index.
+  Falsified $\Rightarrow$ the worklist order becomes IR semantics.
+\item[F10 (sampler agnosticism).] No charter result depends on the sampler.
+  \emph{Test:} run the F1--F7 oracle comparisons under at least two builder
+  outcomes (e.g.\ first-to-fire and next-reaction); all pass under both.
+\item[F11 (delta fidelity).] Emitted deltas agree with the recompute
+  oracle. \emph{Test:} debug-mode membership and anchor assertions
+  (\S\ref{sec:deltas}) hold over long mixed runs including preemption ---
+  and, in phase 2, processor sharing, which is the case only the anchor
+  check can see.
+\end{description}
+
+\end{document}

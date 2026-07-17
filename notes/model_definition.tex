@@ -1,0 +1,482 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1.1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\DeclareUnicodeCharacter{03B8}{\ensuremath{\theta}}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+% Same plain Julia listing style as queue_layers.tex.
+\lstdefinelanguage{Julia}{
+  keywords={abstract,type,struct,mutable,function,end,if,else,elseif,for,
+            while,begin,return,using,import,export,const,where,in,do,let,
+            quote,macro,module,true,false,nothing,missing,local,global},
+  sensitive=true,
+  morecomment=[l]{\#},
+  morestring=[b]",
+}
+\lstset{
+  language=Julia,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  commentstyle=\color{black!55}\itshape,
+  stringstyle=\color{black!70},
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  breakatwhitespace=true,
+  frame=single,
+  framerule=0.3pt,
+  xleftmargin=1em,
+  xrightmargin=1em,
+  aboveskip=0.8\baselineskip,
+  belowskip=0.8\baselineskip,
+  literate={θ}{{$\theta$}}1
+           {τ}{{$\tau$}}1
+           {β}{{$\beta$}}1
+           {∂}{{$\partial$}}1
+           {≤}{{$\le$}}1
+           {≥}{{$\ge$}}1
+           {∈}{{$\in$}}1
+           {∞}{{$\infty$}}1
+           {·}{{$\cdot$}}1
+           {—}{{---}}1
+           {–}{{--}}1,
+}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Concourse: Amendments to the Queueing Model Definition}
+\author{Concourse research notes}
+\date{July 17, 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%==============================================================================
+\section{What this document is}
+
+\code{queue\_layers.tex} (in this directory) defines a three-layer queueing
+library: a surface language, a GSMP intermediate representation, and the
+CompetingClocks sampler. Concourse.jl adopts that design with the following
+changes, and this note is the normative statement of them. Where the two
+documents disagree, this one wins; everything not amended here carries over
+unchanged.
+
+The amendments, agreed in design discussion on July 17, 2026:
+
+\begin{description}
+\item[A1.] \emph{Clock bookkeeping is model state.} Per-clock enabling times
+  and banked ages move into \code{QueueState}. The sampler receives them; it
+  does not own them. (Section~\ref{sec:a1}.)
+\item[A2.] \emph{The clock-family set is open.} \code{queue\_layers.tex}
+  claimed two clock families suffice; reneging and server breakdowns refute
+  that as a design ceiling. Families become a registry the interpreter
+  iterates, not a closed enumeration it hard-codes. (Section~\ref{sec:a2}.)
+\item[A3.] \emph{Every function-valued field is a combinator value.} Laws,
+  mark samplers, discipline components, and routing kernels are inspectable
+  expression values with derivable reads, with one explicitly-marked opaque
+  escape hatch. (Section~\ref{sec:a3}.)
+\item[A4.] \emph{No hidden \code{rand()}.} Every auxiliary draw --- marks,
+  probabilistic routing, SIRO's pick --- consumes an explicit, keyed,
+  recorded draw source that appears in the function's signature.
+  (Section~\ref{sec:a4}.)
+\end{description}
+
+One contract delta against ClockGradients.jl falls out of A1 and is proposed
+in Section~\ref{sec:cd1}: an optional four-argument
+\code{fire(model, state, key, t)}.
+
+A second decision frames the whole note: Concourse depends on
+CompetingClocks.jl and ClockGradients.jl and \emph{not} on ChronoSim.jl.
+This is cheaper than \code{queue\_layers.tex} assumed, because every seam it
+borrowed from ChronoSim exists in the two remaining packages:
+\code{:resume} memory is \code{enable!} with a left-shifted enabling time
+(\code{te < when} is documented behavior of the sampler interface);
+processor sharing's mid-flight re-evaluation is \code{reenable!}; the record
+enters the estimators through the \code{gradient\_record} generic, which has
+no core methods precisely so that frameworks can attach their own. The one
+substantial replacement is the nine-verb branchable-world protocol for the
+clone-based estimators, deferred to phase~2. Concourse thereby becomes the
+second independent implementation of the ClockGradients model contract,
+beside the ChronoSim package extension --- which is the test that the
+contract is an abstraction and not a description of its only client.
+
+\paragraph{Falsification stance.} Following the practice in
+\code{queue\_layers.tex}~\S5, every design claim in this note appears in
+Section~\ref{sec:charter} paired with the concrete phase-1 test that would
+falsify it. The phase-1 prototype exists to run that table, not to be a
+library.
+
+%==============================================================================
+\section{A1: clock bookkeeping is model state}
+\label{sec:a1}
+
+\subsection{The argument}
+
+A GSMP's Markov state is $(s, \text{clock readings})$ --- Glasserman Ch.~2
+gives the canonical construction. \code{queue\_layers.tex} put $s$ in
+\code{QueueState} and left the readings in the sampler. That split fails
+twice:
+
+\begin{enumerate}
+\item \emph{It breaks \code{fire}'s purity for age-reading disciplines.}
+  SRPT's \code{preempt} compares remaining sizes, which are size marks minus
+  ages; \code{:resume} re-enabling needs the banked age. If ages live only in
+  the sampler, \code{settle!} must call \code{enabled\_ages} on the sampler
+  mid-\code{fire}, which inverts the layering and makes \code{fire} depend on
+  an argument it does not receive.
+\item \emph{It makes the four-argument \code{clock\_distribution} ambiguous
+  under replay.} ClockGradients' score replay evaluates
+  \code{clock\_distribution(model, θ, k, state)} for every enabled clock $k$
+  at every inter-event interval --- at states \emph{later} than $k$'s
+  enabling (\code{src/score.jl:53--58}). A time-varying law (nonhomogeneous
+  arrivals, a shift schedule) must construct its distribution anchored at
+  $k$'s enabling time $t_e$. If the model reads a single ``current time''
+  field, a long-enabled clock gets the wrong anchor at later states. Only a
+  \emph{per-clock} $t_e$ table inside the state gives the same answer at
+  every state from which the replay asks.
+\end{enumerate}
+
+The replay machinery already concedes the point: \code{score\_loglikelihood}
+maintains an external per-clock enabling-time table via
+\code{sync\_enabling\_times!} because the likelihood cannot be computed
+without one. A1 moves that table to where the formalism says it lives.
+
+\subsection{The amended state}
+
+\begin{lstlisting}
+struct QueueState
+    time::Float64                    # time of the firing that produced this state
+    buf::Vector{Vector{JobId}}       # per station, in discipline order
+    srv::Vector{Vector{JobId}}       # per station, the jobs in service
+    jobs::Dict{JobId,Job}            # marks; birth time lives in the record
+    pending::Vector{Dict{GroupId,Vector{JobId}}}  # joins: siblings so far
+    cursor::Vector{Int}              # stateful routing kernels
+    next_id::JobId
+    te::Dict{ClockKey,Float64}       # enabling time, per enabled clock
+    bank::Dict{ClockKey,Float64}     # accrued age, per disabled :resume clock
+end
+\end{lstlisting}
+
+Bookkeeping rules, all inside \code{fire}/\code{settle!}:
+
+\begin{itemize}
+\item A clock entering the enabled set at firing time $t$ gets
+  $\code{te}[k] = t - \code{bank}[k]$ (with $\code{bank}[k] = 0$ when absent),
+  and its bank entry is deleted. The left-shifted $t_e$ is exactly what
+  \code{enable!(sampler, k, dist, te, when)} receives, so the sampler and the
+  state agree by construction.
+\item A clock leaving the enabled set without firing, under a discipline with
+  \code{memory = :resume}, banks its age:
+  $\code{bank}[k] \mathrel{+}= t - \code{te}[k]$. Under \code{:fresh} the
+  bank entry is deleted. Firing deletes both entries.
+\item A clock's age at any state is $\code{st.time} - \code{st.te}[k]$ for
+  enabled clocks and $\code{st.bank}[k]$ for disabled ones. SRPT's
+  \code{preempt} and the PS re-enabling read \emph{these}; no model code
+  calls \code{enabled\_ages} on the sampler, ever. The sampler is a pure
+  consumer of state-derived arguments.
+\end{itemize}
+
+Two consequences worth naming. First, \code{states\_equal} and record-fold
+replay now compare and reproduce the clock bookkeeping too, so a divergence
+between the model's ages and the sampler's is detectable rather than silent
+--- the runtime invariant is \code{st.te == sampler's enabling times} after
+every firing. Second, the state stays plain data: two \code{Dict}s of
+\code{isbits} pairs copy, hash, and diff like everything else in it.
+
+\subsection{Contract delta CD-1: \code{fire} receives the firing time}
+\label{sec:cd1}
+
+\code{fire} must stamp \code{st.time} and the new \code{te} entries, so it
+needs the firing time --- which the current ClockGradients contract does not
+pass: \code{fire(model, state, key)} is called at twelve sites across
+\code{score.jl}, \code{spa.jl}, \code{functionals.jl}, \code{clockworld.jl},
+\code{records.jl}, and \code{conformance.jl}, and at \emph{every} site the
+firing (or swap) time is already in scope in the caller. The proposal:
+
+\begin{lstlisting}
+# In ClockGradients: the time-aware form, with a fallback so existing
+# time-free models are untouched.
+fire(model, state, key, t) = fire(model, state, key)
+# All internal call sites switch to the four-argument form.
+\end{lstlisting}
+
+Backwards compatible, mechanical, and confined to the user's own package.
+Concourse implements only the four-argument method. The alternative ---
+keeping \code{fire} time-free and expressing every law in age coordinates ---
+was rejected because it silently forbids wall-clock-inhomogeneous laws,
+which are a stated goal (``time-varying hazards for rates'').
+
+SPA's hypothetical firings (\code{spa.jl:70,99,271}) pass the swap time;
+that is the semantically correct anchor for the alternate world's new
+enablings, and the criticality gate's state comparisons inherit it.
+
+%==============================================================================
+\section{A2: the clock-family set is open}
+\label{sec:a2}
+
+\subsection{The refutation of ``two families suffice''}
+
+\code{queue\_layers.tex} finding~1 claimed arrival and service clocks cover
+the design. The claim holds for its chosen feature set and fails one step
+outside it: \emph{reneging} --- a patience clock on a job that is waiting,
+not in service --- is bread-and-butter queueing (M/M/1+M, every call-center
+model) and is a third family. Server breakdowns and vacations are a fourth.
+The finding is therefore demoted from an architectural assumption to a
+statement about the initial feature set, and the architecture must make
+adding a family cheap.
+
+\subsection{The family registry}
+
+\code{ClockKey} stays one concrete isbits tuple; the \code{Symbol} field is
+the open dimension:
+
+\begin{lstlisting}
+const ClockKey = Tuple{Symbol,Int32,Int64}
+# (:arrival,  station, 0)      the source's next-arrival clock
+# (:service,  station, jobid)  one clock per job in service
+# (:patience, station, jobid)  one clock per waiting job, if reneging   [later]
+# (:repair,   station, srvidx) one clock per down server, if breakdowns [later]
+\end{lstlisting}
+
+A clock family is a value with three functions --- the same move A3 makes
+for laws, applied to the interpreter itself:
+
+\begin{lstlisting}
+struct ClockFamily
+    name::Symbol
+    enumerate  # (model, state) -> iterator of ClockKey   (who is enabled)
+    law        # (model, θ, key, state) -> UnivariateDistribution
+    fire       # (model, state, key, t) -> new state      (what firing means)
+end
+\end{lstlisting}
+
+\code{QueueGSMP} carries \code{families::Vector{ClockFamily}};
+\code{enabled} is the concatenation of each family's \code{enumerate} in
+registry order (deterministic order, as the contract requires);
+\code{clock\_distribution} and \code{fire} dispatch on \code{key[1]} through
+the registry. The interpreter, the record fold, the checker's randomness
+census, and the estimators never mention a family by name. The acid test is
+F2 in the charter: adding \code{:patience} must touch the registry and
+nothing else.
+
+What stays closed: a family's \code{fire} still works through the shared
+\code{deposit!}/\code{settle!} vocabulary, so disciplines and routing
+compose with new families instead of each family reinventing station
+semantics. (A patience firing is ``remove job $j$ from \code{buf}, deposit
+to the reneging destination''; a repair firing is ``increment station
+capacity, \code{settle!}''.)
+
+%==============================================================================
+\section{A3: every function-valued field is a combinator value}
+\label{sec:a3}
+
+\subsection{The argument}
+
+The IR's advertised virtue is that it is \emph{data} --- printable,
+diffable, hashable, checkable. \code{CompiledStation}'s
+\code{service::Function}, \code{routing::Function}, \code{mark::Function}
+fields quietly forfeit that: closures cannot be hashed, compared,
+serialized, or introspected, and the checks that justify the IR ---
+C2 (mark typing) and C6 (randomness census / estimator tiers) --- need to
+know what a law reads and whether it depends on $\theta$. The routing
+kernels already show the fix (\code{Always}, \code{ByMark},
+\code{JoinShortestQueue} are values); A3 applies it uniformly.
+
+\subsection{The scalar-expression algebra}
+
+One small expression type feeds every parameter slot:
+
+\begin{lstlisting}
+# ScalarExpr: a tree with derivable reads.
+Param(:mu)          # reads θ by declared name -> θ-dependence is visible
+Mark(:size)         # reads a job mark        -> C2 dataflow is visible
+Enab()              # the wall-clock enabling time t_e
+Const(2.0)
++, *, inv, log, ... # lifted arithmetic on ScalarExpr
+\end{lstlisting}
+
+A \emph{law} is a distribution family applied to scalar expressions; a
+\emph{mark sampler} is a named tuple of distribution expressions; a
+\emph{discipline} is the four-field value of \code{queue\_layers.tex}
+\S2.2 with its \code{by}-style components as \code{ScalarExpr} rather than
+closures:
+
+\begin{lstlisting}
+service = Law(Exponential, scale = Mark(:size) * inv(Param(:mu_short)))
+mark    = MarkLaw(size = Law(LogNormal, μ = Const(0.0), σ = Const(1.0)))
+disc    = Priority(by = Mark(:class); preempt = true, memory = :resume)
+\end{lstlisting}
+
+Derived, not declared: \code{reads\_θ(law)}, \code{reads\_marks(law)},
+\code{reads\_time(law)} walk the tree. C2 becomes a dataflow check over
+values; C6's census and the estimator-tier table are computed, not asserted.
+Nonhomogeneous laws use \code{Enab()}; state-reading kernels
+(\code{JoinShortestQueue}) remain the named combinators they already were.
+
+\subsection{The escape hatch}
+
+\begin{lstlisting}
+OpaqueLaw(f; reads_θ = true, reads_marks = (:size,), reads_time = false)
+\end{lstlisting}
+
+An opaque law carries \emph{mandatory} declared reads; the checker trusts
+the declaration, marks every conclusion resting on it as
+``declared, unverified,'' and degrades the estimator tiers it cannot
+certify. A closure with no declaration is a construction-time error, not a
+warning. The same wrapper exists for kernels and discipline components. The
+charter's F3 measures whether the algebra is rich enough that the hatch
+stays shut for the standard models.
+
+%==============================================================================
+\section{A4: no hidden randomness}
+\label{sec:a4}
+
+The rule from \code{queue\_layers.tex}~\S3.5 --- every draw is a clock, a
+recorded mark, or a recorded choice --- becomes a signature-level fact.
+Auxiliary draws (marks at arrival, \code{Probabilistic} routing, SIRO's
+pick) consume an explicit draw source:
+
+\begin{lstlisting}
+# The draw source is an argument wherever auxiliary randomness may occur.
+select(disc, buf, state, draws)          # SIRO reads; FCFS ignores
+route(kernel, job, state, draws)         # Probabilistic reads; ByMark ignores
+draw_marks(marklaw, draws)               # at arrival firings
+\end{lstlisting}
+
+Two modes, one type. In live simulation, \code{draws} wraps
+CompetingClocks' \code{KeyedStreams}, keyed by
+\code{(firing ClockKey, purpose::Symbol)} so that a draw belongs to a clock
+and purpose rather than to a position in a global call sequence --- the
+same common-random-numbers discipline the sampler already imposes on clock
+randomness, extended to the auxiliary draws. Every value drawn is appended
+to the current record entry. In replay, \code{draws} is the recorded
+sequence, and drawing returns the recorded values in consumption order ---
+which is precisely the conditioning that makes \code{fire} deterministic
+given the record, and which the likelihood's mark and routing-mass terms
+require.
+
+The marked record is therefore
+\[
+\mathcal{R} = \big( (k_i, t_i, a_i) \big)_{i},
+\qquad a_i = \text{the auxiliary draws consumed by firing } i,
+\text{ in order},
+\]
+\code{queue\_layers.tex}'s record with the mark column generalized to
+``all auxiliary draws.'' The checker's census (C6) enumerates the possible
+draws per family from the combinator values (A3), so
+record-schema-vs-model agreement is itself checkable.
+
+%==============================================================================
+\section{The amended contract surface}
+\label{sec:contract}
+
+What Concourse implements, in ClockGradients' vocabulary. Deltas against the
+shipped contract are marked.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Contract function & Concourse implementation & Delta \\
+\midrule
+\code{initial\_state(m)} & empty places; \code{te}, \code{bank} empty; \code{time = 0} & --- \\
+\code{clockkeytype(m)} & \code{Tuple\{Symbol,Int32,Int64\}} & --- \\
+\code{enabled(m, st)} & concat of family \code{enumerate}s, registry order & --- \\
+\code{clock\_distribution(m, θ, k, st)} & family \code{law}; anchors from \code{st.te} & --- \\
+\code{fire(m, st, k, t)} & family \code{fire} through \code{deposit!}/\code{settle!} & CD-1 \\
+\code{gradient\_record(m, rec, θ)} & one method for the marked record type & by design \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Replay determinism is conditional on the recorded draws (A4), exactly as
+the ChronoSim extension conditions on its recorded firings. The nine-verb
+branchable world over \code{(QueueGSMP, QueueState, SamplingContext)} is
+phase~2; \code{check\_branchable} is its acceptance test.
+
+%==============================================================================
+\section{The falsification charter}
+\label{sec:charter}
+
+Each claim is stated so that the phase-1 (or explicitly phase-2) prototype
+can refute it. A failed test is a design discovery, not a bug to paper over.
+Oracles follow the 4-standard-error convention; closed forms come from the
+C5 detector cases (M/M/1, the SITA farm as two independent M/G/1 queues,
+Erlang-A for reneging).
+
+\begin{description}
+\item[F1 (A1 sufficiency).] With \code{te}/\code{bank} in state, no model
+  code needs sampler introspection. \emph{Test:} SRPT and
+  preempt-\code{:resume} runs match their oracles while the model layer has
+  no reference to \code{enabled\_ages}; the \code{st.te}-vs-sampler
+  invariant holds after every firing of a long mixed run.
+\item[F2 (A2 openness).] A new clock family costs one registry entry.
+  \emph{Test:} implement \code{:patience} (reneging); diff the change ---
+  if any file other than the family registry and the surface constructor
+  changes, the claim is falsified. M/M/1+M against Erlang-A.
+\item[F3 (A3 coverage).] The scalar algebra covers the five
+  \code{queue\_layers.tex} models plus reneging with zero \code{Opaque}
+  escapes. \emph{Test:} build all six; count escapes.
+\item[F4 (A4 determinism).] \code{fire} is deterministic given the record.
+  \emph{Test:} fold the marked record and compare \code{states\_equal}
+  against the live trajectory at every index, including \code{te} and
+  \code{bank}.
+\item[F5 (CD-1 sufficiency).] The four-argument \code{fire} is the only
+  ClockGradients change queueing needs. \emph{Test:} score and IPA on a
+  nonhomogeneous-arrival M(t)/M/1 against finite differences, running on
+  patched ClockGradients with no other core edits.
+\item[F6 (cascade totality).] Under check C3 (acyclic blocking),
+  \code{deposit!}/\code{settle!} cascades terminate deterministically.
+  \emph{Test:} property test over random finite-buffer networks with
+  \code{:block}; assert termination and replay-order equality. (The
+  worklist order itself is a middle-layer decision,
+  Section~\ref{sec:queued}.)
+\item[F7 (initial family set).] \code{\{:arrival, :service\}} suffices for
+  the five \code{queue\_layers.tex} models --- the surviving, weakened form
+  of the old finding~1. \emph{Test:} phase 1 builds all five with two
+  families; reneging (F2) is the designed refutation lying one step beyond.
+\item[F8 (truncate-and-rescale, phase 2).] The speed-free compilation of PS
+  equals an explicit-speed reference. \emph{Test:} M/M/1-PS against its
+  closed form, and against a Bogliolo-style clock-and-speed-matrix
+  reference implementation on a small case.
+\end{description}
+
+%==============================================================================
+\section{Queued middle-layer questions}
+\label{sec:queued}
+
+Decisions that belong to the event-loop design conversation, deliberately
+not made here. A1/CD-1 already settled ``who owns time'' (the state records
+it; the interpreter advances it; the sampler is told it).
+\emph{Update, later the same day:} items 1, 3, and 4 are decided and item 2
+is framed with a proposal in \code{event\_loop.tex} (this directory), which
+is now the normative middle-layer document.
+
+\begin{enumerate}
+\item \emph{Diff vs.\ push clock lifecycle.} Recompute \code{enabled} and
+  diff after each firing (simple, $O(\text{clocks})$ per event), or have
+  \code{fire} emit its enable/disable deltas (\code{fire\_changes} exists in
+  the contract for this)? Phase 1 should measure before optimizing.
+\item \emph{The cascade worklist.} Order and representation for multi-hop
+  blocking chains; the determinism argument F6 must be made for whatever is
+  chosen.
+\item \emph{Record capture.} Interpreter-owned marked record vs.\ a
+  CompetingClocks watcher middleware with an auxiliary-draw column bolted
+  on.
+\item \emph{Sampler spec policy.} \code{NextReactionMethod} default,
+  \code{FirstToFireMethod(coupling=:carry)} when IPA wants the carry
+  coupling --- who chooses, and where the choice surfaces in the API.
+\end{enumerate}
+
+\end{document}
