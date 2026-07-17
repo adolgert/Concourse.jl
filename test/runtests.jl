@@ -13,7 +13,8 @@ wanted(name) = isempty(FILTER) || occursin(FILTER, lowercase(name))
 
 for file in ["test_mm1.jl", "test_replay.jl", "test_splits.jl",
              "test_blocking.jl", "test_checks.jl", "test_samplers.jl",
-             "test_reneging.jl", "test_ps.jl", "test_gradients.jl"]
+             "test_reneging.jl", "test_ps.jl", "test_gradients.jl",
+             "test_branch.jl"]
     path = joinpath(@__DIR__, file)
     isfile(path) && include(path)
 end

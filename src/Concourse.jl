@@ -31,6 +31,7 @@ include("semantics.jl")
 include("record.jl")
 include("interpret.jl")
 include("gradients.jl")
+include("branchworld.jl")
 
 # The combinator algebra (A3)
 export ScalarExpr, Param, Mark, Enab, Const, Law, Opaque, MarkLaw
@@ -46,6 +47,7 @@ export initial_state, enabled, clock_distribution, fire_changes, states_equal
 export simulate, MarkedRecord, replay, time_average, number_in_system
 export FirstToFireMethod, NextReactionMethod, FirstReactionMethod
 # The ClockGradients binding
-export ReplayModel, replay_model
+export ReplayModel, replay_model, live_model
+export ConcourseWorld, branch_world
 
 end # module Concourse

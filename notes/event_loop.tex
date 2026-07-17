@@ -391,6 +391,48 @@ first exercise of CG-M3's mid-flight machinery by a real model, and the
 validation of the capability table's ``likelihood \checkmark'' row for PS.
 
 %==============================================================================
+\section{Phase 2: the branchable world}
+\label{sec:branchable}
+
+Implemented July 17, 2026: \code{ConcourseWorld} =
+\code{(QueueGSMP, θ, QueueState, SamplingContext, time)} implements
+ClockGradients' ten-verb branchable protocol — the second implementation
+beside the ChronoSim adapter, the same two-clients test the model contract
+passed. The verbs are thin: peek is the context's cached reservation;
+commit and force share one update path (\code{fire!}/\code{force\_fire!} on
+the context, then \code{fire\_changes} plus the interpreter's own
+\code{apply\_deltas!}); a coupled clone is empty-clone +
+\code{copy\_clocks!} + time restore; rekey is rekey-then-\code{jitter!}
+(reseeding alone would replay cached putative times); ages come from the
+state's own \code{te} table (the A1 invariant makes the sampler agree),
+sorted by key; the dual-θ distribution rebuild is
+\code{clock\_distribution} at the world's state, with
+\code{SharedRemaining} delegating \code{partype} to its base so the dual
+probe sees θ.
+
+Scope: draw-free models only, refused at factory construction. Branch
+worlds run forward past any record, and a model whose \code{fire} consumes
+auxiliary randomness would need live keyed draw streams with clone/rekey
+semantics of their own — an open design, not an accident. The live model
+binding (\code{live\_model}) gives SPA's twin an off-record \code{fire}
+that fails loudly if a draw is requested.
+
+CD-1's last estimator threading landed with this work: SPA's commuting
+gates and forced twins fire at the swap time, the horizon jump fires at the
+horizon, and \code{fire\_changes} gained its own four-argument default in
+the contract.
+
+Validation: \code{check\_branchable} passes in full for both an M/M/1 world
+and a PS world (clone coupling and rekey divergence across mid-flight
+re-declarations); \code{branching\_gradient} matches finite differences on
+the terminal number-in-system for M/M/1 \emph{and} for PS — the capability
+table's ``needs framework world'' cell, now green for the branching
+estimator; \code{spa\_gradient} matches finite differences on M/M/1
+occupancy. SPA on PS remains refused upstream by its own multi-segment
+guard (the boundary weight for a re-declared candidate is unprototyped),
+and IPA over PS records is untested — the two honest residues.
+
+%==============================================================================
 \section{Charter extensions}
 \label{sec:charter}
 
@@ -410,6 +452,14 @@ Continuing the numbering of \code{model\_definition.tex}~\S7:
   (\S\ref{sec:deltas}) hold over long mixed runs including preemption ---
   and, in phase 2, processor sharing, which is the case only the anchor
   check can see.
+\item[F12 (protocol portability).] The branchable protocol is an
+  abstraction, not a description of one adapter. \emph{Test:}
+  \code{check\_branchable} passes in full on \code{ConcourseWorld} for a
+  frozen-law model and for PS (re-declarations under clone/rekey).
+\item[F13 (clone estimation over re-declared clocks).] The branching
+  estimator is valid when clocks are re-declared mid-flight.
+  \emph{Test:} \code{branching\_gradient} vs.\ common-random-number finite
+  differences on the PS terminal count, within 4 combined SEs.
 \end{description}
 
 \end{document}

@@ -34,20 +34,29 @@ function simulate(m::QueueGSMP, θ::AbstractVector, horizon::Real;
         st, deltas = fire_changes(m, st, key, t, ds; worklist)
         push_firing!(rec, key, t, ds.consumed)
         keep_states && push!(states, st)
-        for (op, k) in deltas
-            if op == :disable
-                disable!(ctx, k)
-            else
-                dist = clock_distribution(m, θ, k, st)
-                shift = st.te[k] - t
-                op == :enable ? enable!(ctx, k, dist, shift) :
-                                reenable!(ctx, k, dist, shift)
-            end
-        end
+        apply_deltas!(ctx, m, θ, st, deltas, t)
         debug && check_membership(m, st, ctx)
     end
     rec.horizon = Float64(horizon)
     keep_states ? (rec, states) : rec
+end
+
+# D1's sampler-facing half, shared by the interpreter and the branchable
+# world: deltas are applied verbatim, with distributions and anchors derived
+# from the post-firing state (a banked age is a negative shift; a PS
+# re-declaration keeps its original te).
+function apply_deltas!(ctx, m::QueueGSMP, θ, st::QueueState, deltas, t::Float64)
+    for (op, k) in deltas
+        if op == :disable
+            disable!(ctx, k)
+        else
+            dist = clock_distribution(m, θ, k, st)
+            shift = st.te[k] - t
+            op == :enable ? enable!(ctx, k, dist, shift) :
+                            reenable!(ctx, k, dist, shift)
+        end
+    end
+    nothing
 end
 
 # F11's membership half: the recompute is the specification, the deltas are

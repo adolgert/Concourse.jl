@@ -45,13 +45,21 @@ Charter scoreboard (claims in the notes' §7 tables):
   fixed-anchor form the state records are the same law (pinned by test),
   the parameterization chosen because the replay bookkeeping holds te
   fixed — and for the dual-safe `SharedRemaining` distribution.
+- **Tested and holding (branchable world):** F12 — `ConcourseWorld`
+  implements the ten-verb protocol, `check_branchable` passes in full for
+  M/M/1 and PS worlds; F13 — `branching_gradient` matches finite
+  differences on the terminal count for M/M/1 *and* PS (the capability
+  table's "needs framework world" cell, green for branching);
+  `spa_gradient` matches finite differences on M/M/1 occupancy, with SPA's
+  `fire` call sites now time-threaded in ClockGradients. Draw-free models
+  only — the factory refuses marks/probabilistic/SIRO, by design.
 - **Partially exercised:** F1 (preempt-`:resume` banking is tested; SRPT
   itself is unimplemented), F7 (M/M/1, SITA, preemptive priority, M/M/1+M,
   PS run; fork–join remains).
-- **Pending:** the nine-verb branchable world and SPA/branching
-  time-threading (those ClockGradients paths still call 3-arg `fire` and
-  fail loudly on time-needing models); IPA for PS (needs the branchable
-  world per the capability table).
+- **Pending:** SPA on PS (refused upstream by its own multi-segment guard);
+  IPA over PS records (untested); branch worlds for models with auxiliary
+  draws (needs clone/rekey semantics for keyed draw streams — open design);
+  fork–join; SRPT.
 
 F2's structural half was a genuine falsification-and-repair: hand-emitted
 deltas would have required interpreter surgery for patience clocks, so delta

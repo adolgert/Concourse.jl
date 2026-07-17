@@ -93,6 +93,8 @@ Base.rand(rng::Random.AbstractRNG, d::SharedRemaining) = invlogccdf(d, -randexp(
 Base.minimum(d::SharedRemaining) = d.shift
 Base.maximum(d::SharedRemaining) = Inf
 Distributions.insupport(d::SharedRemaining, x::Real) = x >= d.shift
+# θ enters only through the base law; age/speed/shift are θ-free state.
+Distributions.partype(d::SharedRemaining) = Distributions.partype(d.base)
 
 function family_law(::Val{:service}, m, θ, key, st)
     stn = m.stations[key[2]]
