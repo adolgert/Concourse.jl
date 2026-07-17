@@ -24,6 +24,12 @@ SIRO() = Discipline(:siro, :back, nothing, :random, false, :fresh)
 function Priority(by::ScalarExpr; preempt::Bool=false, memory::Symbol=:resume)
     Discipline(:priority, :ordered, by, :front, preempt, memory)
 end
+# Every resident job is in service at speed min(1, servers/n); the buffer is
+# a zero-length staging area the settle pass immediately drains. :rescale
+# memory keeps te at the original enabling and re-expresses speed changes as
+# mid-flight re-evaluations, the ClockGradients segment convention — NOT the
+# anchor-at-now compilation of queue_layers.tex §3.5 (see event_loop.tex).
+ProcessorSharing() = Discipline(:ps, :back, nothing, :front, false, :rescale)
 
 abstract type Kernel end
 

@@ -15,7 +15,8 @@ library.
 module Concourse
 
 using Distributions
-using Random: Xoshiro
+import Random
+using Random: Xoshiro, randexp
 import ClockGradients
 import CompetingClocks
 using CompetingClocks: SamplingContext, SamplerBuilder,
@@ -36,7 +37,7 @@ export ScalarExpr, Param, Mark, Enab, Const, Law, Opaque, MarkLaw
 export reads_params, reads_marks, reads_time
 # The surface language
 export QueueNetwork, source!, station!, sink!, route!, compile
-export FCFS, LCFS, SIRO, Priority
+export FCFS, LCFS, SIRO, Priority, ProcessorSharing
 export Always, ByMark, Probabilistic, RoundRobin, FCFSUnblock
 # The IR and its contract functions
 export QueueGSMP, QueueState, ClockKey

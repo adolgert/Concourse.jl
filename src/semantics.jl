@@ -52,8 +52,60 @@ function family_law(::Val{:arrival}, m, θ, key, st)
     builddist(m.stations[key[2]].service, m.params, θ, NamedTuple(), st.te[key])
 end
 
+# The wall-time law of a shared job, anchored at the ORIGINAL te: given
+# internal age `age` banked at the last speed change (wall offset `shift` =
+# anchor − te) and current speed `speed`, the clock fires at wall age
+# shift + (X − age)/speed with X ~ base conditioned on X > age. Implemented
+# directly instead of composing Distributions' truncated/affine wrappers:
+# Truncated's logccdf produces NaN ForwardDiff partials through its stored
+# upper-bound constants, and every method here is an explicit two-call
+# delegation to the base law, dual-clean by construction.
+struct SharedRemaining{D<:UnivariateDistribution} <: ContinuousUnivariateDistribution
+    base::D
+    age::Float64
+    speed::Float64
+    shift::Float64
+end
+
+_sr_x(d::SharedRemaining, x) = d.age + d.speed * (x - d.shift)
+
+function Distributions.logccdf(d::SharedRemaining, x::Real)
+    norm = logccdf(d.base, d.age)
+    x <= d.shift && return zero(norm)
+    logccdf(d.base, _sr_x(d, x)) - norm
+end
+Distributions.ccdf(d::SharedRemaining, x::Real) = exp(logccdf(d, x))
+Distributions.cdf(d::SharedRemaining, x::Real) = -expm1(logccdf(d, x))
+Distributions.logcdf(d::SharedRemaining, x::Real) = log(cdf(d, x))
+
+function Distributions.logpdf(d::SharedRemaining, x::Real)
+    norm = logccdf(d.base, d.age)
+    x < d.shift && return oftype(norm, -Inf)
+    log(d.speed) + logpdf(d.base, _sr_x(d, x)) - norm
+end
+Distributions.pdf(d::SharedRemaining, x::Real) = exp(logpdf(d, x))
+
+Distributions.invlogccdf(d::SharedRemaining, lp::Real) =
+    d.shift + (invlogccdf(d.base, lp + logccdf(d.base, d.age)) - d.age) / d.speed
+Distributions.quantile(d::SharedRemaining, q::Real) = invlogccdf(d, log1p(-q))
+Distributions.cquantile(d::SharedRemaining, q::Real) = invlogccdf(d, log(q))
+Base.rand(rng::Random.AbstractRNG, d::SharedRemaining) = invlogccdf(d, -randexp(rng))
+Base.minimum(d::SharedRemaining) = d.shift
+Base.maximum(d::SharedRemaining) = Inf
+Distributions.insupport(d::SharedRemaining, x::Real) = x >= d.shift
+
 function family_law(::Val{:service}, m, θ, key, st)
-    builddist(m.stations[key[2]].service, m.params, θ, st.jobs[key[3]], st.te[key])
+    stn = m.stations[key[2]]
+    F = builddist(stn.service, m.params, θ, st.jobs[key[3]], st.te[key])
+    stn.discipline.name == :ps || return F
+    # Speed changes compile to mid-flight re-evaluations of this value with
+    # te fixed — the contract's segment convention, not a te rewrite.
+    n = length(st.srv[key[2]])
+    r = min(1.0, stn.servers / n)
+    a = get(st.bank, key, 0.0)
+    shift = get(st.anchor, key, st.te[key]) - st.te[key]
+    (a == 0.0 && r == 1.0 && shift == 0.0) && return F
+    SharedRemaining(F, a, r, shift)
 end
 
 function family_law(::Val{:patience}, m, θ, key, st)
@@ -116,13 +168,46 @@ function derive_deltas!(m::QueueGSMP, old::QueueState, new::QueueState,
             end
             for k in b
                 (k in aset && k != fired) && continue
-                new.te[k] = t - get(new.bank, k, 0.0)
-                delete!(new.bank, k)
+                if family_memory(Val(fam), m, k) == :resume
+                    new.te[k] = t - get(new.bank, k, 0.0)
+                    delete!(new.bank, k)
+                else
+                    new.te[k] = t
+                    delete!(new.bank, k)
+                    delete!(new.anchor, k)
+                end
                 push!(deltas, (:enable, k))
             end
+            family_reenables!(deltas, Val(fam), m, old, new, s, t)
         end
     end
     deltas
+end
+
+# The one delta kind membership cannot see (event_loop.tex §2.4): a clock
+# whose law changed while it stayed enabled. Default: no family re-evaluates.
+family_reenables!(deltas, ::Val, m, old, new, s, t) = nothing
+
+# Processor sharing: a change in the resident count changes every survivor's
+# speed. Bank the internal age accrued at the old speed, move the anchor to
+# now, leave te alone, and tell the sampler to re-evaluate.
+function family_reenables!(deltas, ::Val{:service}, m::QueueGSMP,
+                           old::QueueState, new::QueueState, s::Int, t::Float64)
+    stn = m.stations[s]
+    (stn.kind == :station && stn.discipline.name == :ps) || return nothing
+    n_old = length(old.srv[s])
+    n_new = length(new.srv[s])
+    (n_old == 0 || n_old == n_new) && return nothing
+    r_old = min(1.0, stn.servers / n_old)
+    for j in new.srv[s]
+        k = (:service, Int32(s), j)
+        j in old.srv[s] || continue      # newly admitted: the enable pass owns it
+        new.bank[k] = get(new.bank, k, 0.0) +
+                      r_old * (t - get(new.anchor, k, new.te[k]))
+        new.anchor[k] = t
+        push!(deltas, (:reenable, k))
+    end
+    nothing
 end
 
 function family_fire!(::Val{:arrival}, m, st, key, t, draws, wl, touched)
@@ -240,7 +325,10 @@ end
 _byval(m, st, disc::Discipline, j::JobId) =
     evalexpr(disc.by, m.params, nothing, st.jobs[j], 0.0)
 
+# Under processor sharing every job is in service; `servers` is the shared
+# capacity in the speed min(1, servers/n), not a slot count.
 _freeslots(m, st, q) =
+    m.stations[q].discipline.name == :ps ? typemax(Int) :
     m.stations[q].servers - length(st.srv[q]) - length(st.hold[q])
 
 function selectjob!(m::QueueGSMP, st::QueueState, q::Int, draws::DrawSource)

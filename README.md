@@ -34,12 +34,21 @@ Charter scoreboard (claims in the notes' §7 tables):
   random blocking networks), F10 (three sampler methods), F11 (membership
   oracle in every debug run). Oracles: M/M/1, M/M/1/K, M/M/1+M,
   thinned-Poisson splits, all within 4 SE.
+- **Tested and holding (phase 2):** F8 (processor sharing): M/M/1-PS matches
+  ρ/(1−ρ); M/G/1-PS is insensitive while the same law under FCFS matches its
+  distinct Pollaczek–Khinchine mean; replay reproduces `bank`/`anchor`
+  exactly; resident-count changes emit `:reenable` for every survivor; and
+  the score gradient matches finite differences through genuine mid-flight
+  segment chains. See `notes/event_loop.tex` §6 for the fixed-anchor
+  convention (a deliberate departure from `queue_layers.tex` §3.5) and the
+  dual-safe `SharedRemaining` distribution it required.
 - **Partially exercised:** F1 (preempt-`:resume` banking is tested; SRPT
-  itself is unimplemented), F7 (M/M/1, SITA, preemptive priority, M/M/1+M
-  run; processor sharing and fork–join are phase 2).
-- **Pending:** F8 (PS truncate-and-rescale), the branchable world,
-  SPA/branching time-threading (those ClockGradients paths still call 3-arg
-  `fire` and fail loudly on time-needing models).
+  itself is unimplemented), F7 (M/M/1, SITA, preemptive priority, M/M/1+M,
+  PS run; fork–join remains).
+- **Pending:** the nine-verb branchable world and SPA/branching
+  time-threading (those ClockGradients paths still call 3-arg `fire` and
+  fail loudly on time-needing models); IPA for PS (needs the branchable
+  world per the capability table).
 
 F2's structural half was a genuine falsification-and-repair: hand-emitted
 deltas would have required interpreter surgery for patience clocks, so delta

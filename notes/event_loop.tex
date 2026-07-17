@@ -4,6 +4,7 @@
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \DeclareUnicodeCharacter{03B8}{\ensuremath{\theta}}
+\DeclareUnicodeCharacter{2212}{\ensuremath{-}}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
 \usepackage{listings}
@@ -311,6 +312,69 @@ Everything model-specific is inside \code{fire\_changes} (families,
 disciplines, kernels, the cascade); everything stochastic is inside
 \code{ctx} and \code{draws}; everything observable is \code{rec}. The loop
 itself should never grow.
+
+%==============================================================================
+\section{Phase 2: the processor-sharing compilation (F8)}
+\label{sec:ps}
+
+Implemented July 17, 2026. Three findings, one of them a deliberate
+departure from \code{queue\_layers.tex}.
+
+\textbf{The anchor convention.} \code{queue\_layers.tex}~\S3.5 compiled a
+speed change as a re-enabling \emph{anchored at the current time}, with the
+banked age moved into a left truncation and an explicit warning against
+also keeping the original enabling time. Concourse does the opposite:
+\code{te} stays at the original enabling forever, and a speed change is a
+\emph{mid-flight re-evaluation} of the clock's wall-time law
+\[
+\text{age} \;\sim\; \text{shift} + (X - a)/r
+\;\Big|\; X > a,
+\qquad X \sim F,\; \text{shift} = \text{anchor} - t_e,
+\]
+carried by the state's \code{bank} (internal age $a$ at the last change)
+and \code{anchor} (that change's wall time) — an A1 addendum. The reason is
+the ClockGradients contract: the Bookkeeper reconstructs \code{te} as the
+enabling firing's time, the score replay accumulates piecewise survival
+against distributions anchored at that fixed \code{te}, and the segment
+machinery (CG-M3) exists precisely to represent re-evaluations at constant
+anchor. Under the anchor-at-now convention every speed change would
+invalidate the reconstructed \code{te} and the whole estimation stack;
+under the fixed-anchor convention it composes with no changes at all. The
+sampler side is the age-keeping \code{reenable!} (\code{relative\_te =
+te − now} $\le 0$), which CompetingClocks documents as exactly this case.
+The interpreter did not change: the \code{:reenable} branch it already had
+for D1 computes that shift.
+
+\textbf{The re-evaluation hook.} The derived-delta pass (\S\ref{sec:derived})
+gained its promised explicit-\code{:reenable} seam:
+\code{family\_reenables!}, a per-family hook run after the membership diff
+at each touched station. The \code{:service} method detects a
+resident-count change at a PS station, banks each survivor's internal age
+at the old speed, moves its anchor, and emits \code{(:reenable, k)}. A
+\code{:rescale} memory mode joins \code{:fresh}/\code{:resume}: enabling
+anchors \code{te} at now and clears the bank, and speed bookkeeping
+otherwise stays out of the generic passes.
+
+\textbf{Dual-safety forced a bespoke distribution.} Composing
+\code{Distributions.truncated} and affine wrappers builds the right law but
+poisons ForwardDiff: \code{Truncated}'s stored bound constants produce NaN
+partials in \code{logccdf} (and a lower bound of zero stores
+$\log 0 = -\infty$ with NaN partials outright). \code{SharedRemaining} in
+\code{src/semantics.jl} implements the conditional-remaining law directly
+— every method a two-call delegation to the base distribution — and is the
+object the sampler draws from, the likelihood differentiates, and the
+Bookkeeper compares for segment detection. (The hunt also surfaced a
+one-line short-circuit-order bug in CompetingClocks'
+\code{lefttrunc.jl}, fixed there.)
+
+The oracles: M/M/1-PS matches $\rho/(1-\rho)$; M/G/1-PS with Gamma service
+is \emph{insensitive} (same mean, while the same law under FCFS matches its
+distinct Pollaczek--Khinchine mean — proving the discipline actually
+shares); replay reproduces \code{bank}/\code{anchor} exactly; every
+resident-count change emits re-enables for every survivor; and the score
+gradient matches finite differences through genuine segment chains — the
+first exercise of CG-M3's mid-flight machinery by a real model, and the
+validation of the capability table's ``likelihood \checkmark'' row for PS.
 
 %==============================================================================
 \section{Charter extensions}
