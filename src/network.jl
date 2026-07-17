@@ -24,6 +24,10 @@ SIRO() = Discipline(:siro, :back, nothing, :random, false, :fresh)
 function Priority(by::ScalarExpr; preempt::Bool=false, memory::Symbol=:resume)
     Discipline(:priority, :ordered, by, :front, preempt, memory)
 end
+# Shortest remaining processing time: the ordering key is size MINUS the
+# clock's age, so it reads the A1 bookkeeping (te for a running clock, bank
+# for a preempted one) — see _ordval. `by` names the size mark.
+SRPT(by::ScalarExpr=Mark(:size)) = Discipline(:srpt, :ordered, by, :front, true, :resume)
 # Every resident job is in service at speed min(1, servers/n); the buffer is
 # a zero-length staging area the settle pass immediately drains. :rescale
 # memory keeps te at the original enabling and re-expresses speed changes as
@@ -73,6 +77,8 @@ struct SurfaceStation
     mark::Union{MarkLaw,Nothing}
     patience::Union{AbstractLaw,Nothing}  # reneging: per-waiting-job clock
     renege_to::Union{Symbol,Nothing}
+    branches::Vector{Symbol}              # forks only
+    parts::Int                            # joins only
 end
 
 mutable struct QueueNetwork
@@ -94,7 +100,7 @@ function source!(net::QueueNetwork, name::Symbol;
                  interarrival::AbstractLaw, mark::Union{MarkLaw,Nothing}=nothing)
     _addstation!(net, SurfaceStation(name, :source, FCFS(), 0, 0, :drop,
                                      FCFSUnblock(), interarrival, mark,
-                                     nothing, nothing))
+                                     nothing, nothing, Symbol[], 0))
 end
 
 function station!(net::QueueNetwork, name::Symbol;
@@ -107,13 +113,31 @@ function station!(net::QueueNetwork, name::Symbol;
         throw(ArgumentError("patience and renege_to come together"))
     _addstation!(net, SurfaceStation(name, :station, discipline, servers,
                                      capacity, overflow, unblock, service,
-                                     nothing, patience, renege_to))
+                                     nothing, patience, renege_to, Symbol[], 0))
 end
 
 function sink!(net::QueueNetwork, name::Symbol)
     _addstation!(net, SurfaceStation(name, :sink, FCFS(), 0, 0, :drop,
                                      FCFSUnblock(), nothing, nothing,
-                                     nothing, nothing))
+                                     nothing, nothing, Symbol[], 0))
+end
+
+# A fork is clock-free: depositing a job splits it into one sibling per
+# branch, all sharing a group id. A join is clock-free synchronization: it
+# stashes siblings and releases one merged job through its route! when all
+# `parts` have arrived.
+function fork!(net::QueueNetwork, name::Symbol; branches)
+    length(branches) >= 2 || throw(ArgumentError("a fork needs at least two branches"))
+    _addstation!(net, SurfaceStation(name, :fork, FCFS(), 0, 0, :drop,
+                                     FCFSUnblock(), nothing, nothing, nothing,
+                                     nothing, collect(Symbol, branches), 0))
+end
+
+function join!(net::QueueNetwork, name::Symbol; parts::Int)
+    parts >= 2 || throw(ArgumentError("a join needs at least two parts"))
+    _addstation!(net, SurfaceStation(name, :join, FCFS(), 0, 0, :drop,
+                                     FCFSUnblock(), nothing, nothing, nothing,
+                                     nothing, Symbol[], parts))
 end
 
 function route!(net::QueueNetwork, origin::Symbol, kernel::Kernel)
@@ -146,6 +170,8 @@ struct CompiledStation
     mark::Union{MarkLaw,Nothing}
     patience::Union{AbstractLaw,Nothing}
     renege::Int32             # destination index; 0 when no patience law
+    branches::Vector{Int32}   # forks only
+    parts::Int                # joins only
 end
 
 struct QueueGSMP
@@ -180,12 +206,15 @@ function compile(net::QueueNetwork)
     check_network(net, names, params)
     stations = CompiledStation[]
     for s in net.stations
-        routing = s.kind == :sink ? nothing : _compilekernel(net.routes[s.name], names)
+        routing = s.kind in (:sink, :fork) ? nothing :
+                  _compilekernel(net.routes[s.name], names)
         renege = s.renege_to === nothing ? Int32(0) : Int32(names[s.renege_to])
         push!(stations, CompiledStation(s.name, s.kind, s.discipline, s.servers,
                                         s.capacity, s.overflow, s.unblock,
                                         s.service, routing, s.mark,
-                                        s.patience, renege))
+                                        s.patience, renege,
+                                        Int32[names[b] for b in s.branches],
+                                        s.parts))
     end
     QueueGSMP(stations, names, params)
 end
@@ -196,7 +225,14 @@ end
 function check_network(net::QueueNetwork, names, params)
     produced_marks = Set{Symbol}()
     for s in net.stations
-        if s.kind != :sink
+        if s.kind == :fork
+            haskey(net.routes, s.name) &&
+                throw(ArgumentError("fork $(s.name) routes through its branches, not route!"))
+            for b in s.branches
+                haskey(names, b) ||
+                    throw(ArgumentError("fork $(s.name) branches to unknown station $b"))
+            end
+        elseif s.kind != :sink
             haskey(net.routes, s.name) ||
                 throw(ArgumentError("station $(s.name) has no route!"))
             k = net.routes[s.name]
@@ -302,13 +338,20 @@ function stability(m::QueueGSMP, θ::AbstractVector)
     for _ in 1:n
         flow = zeros(n)
         for (s, stn) in enumerate(m.stations)
+            if stn.kind == :fork
+                for b in stn.branches
+                    flow[b] += λ[s]
+                end
+                continue
+            end
             stn.routing === nothing && continue
+            rate = stn.kind == :join ? λ[s] / stn.parts : λ[s]
             k = stn.routing
             if k.kind == :always
-                flow[k.dests[1]] += λ[s]
+                flow[k.dests[1]] += rate
             elseif k.kind == :probabilistic
                 for (i, d) in enumerate(k.dests)
-                    flow[d] += λ[s] * k.probs[i]
+                    flow[d] += rate * k.probs[i]
                 end
             end
         end

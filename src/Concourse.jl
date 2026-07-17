@@ -37,8 +37,8 @@ include("branchworld.jl")
 export ScalarExpr, Param, Mark, Enab, Const, Law, Opaque, MarkLaw
 export reads_params, reads_marks, reads_time
 # The surface language
-export QueueNetwork, source!, station!, sink!, route!, compile
-export FCFS, LCFS, SIRO, Priority, ProcessorSharing
+export QueueNetwork, source!, station!, sink!, fork!, join!, route!, compile
+export FCFS, LCFS, SIRO, Priority, ProcessorSharing, SRPT
 export Always, ByMark, Probabilistic, RoundRobin, FCFSUnblock
 # The IR and its contract functions
 export QueueGSMP, QueueState, ClockKey

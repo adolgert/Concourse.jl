@@ -219,14 +219,14 @@ function family_fire!(::Val{:arrival}, m, st, key, t, draws, wl, touched)
     st.next_id += 1
     st.jobs[j] = drawmarks!(draws, stn.mark, t)
     d = routejob!(m, st, Int(s), j, draws)
-    deposit!(m, st, Int(s), d, j, wl, touched)
+    deposit!(m, st, Int(s), d, j, wl, touched, draws)
 end
 
 function family_fire!(::Val{:service}, m, st, key, t, draws, wl, touched)
     _, s, j = key
     _remove!(st.srv[s], j)
     d = routejob!(m, st, Int(s), j, draws)
-    deposit!(m, st, Int(s), d, j, wl, touched)
+    deposit!(m, st, Int(s), d, j, wl, touched, draws)
     push!(wl, Int(s))
 end
 
@@ -236,7 +236,7 @@ end
 function family_fire!(::Val{:patience}, m, st, key, t, draws, wl, touched)
     _, s, j = key
     _remove!(st.buf[s], j)
-    deposit!(m, st, Int(s), Int(m.stations[s].renege), j, wl, touched)
+    deposit!(m, st, Int(s), Int(m.stations[s].renege), j, wl, touched, draws)
     push!(wl, Int(s))
 end
 
@@ -283,11 +283,44 @@ end
 # derived afterwards from the membership these moves imply.
 
 function deposit!(m::QueueGSMP, st::QueueState, origin::Int, d::Int, j::JobId,
-                  wl::Vector{Int}, touched::Set{Int})
+                  wl::Vector{Int}, touched::Set{Int}, draws::DrawSource)
     push!(touched, d)
     stn = m.stations[d]
     if stn.kind == :sink
         delete!(st.jobs, j)      # the departure remains visible in the record
+        delete!(st.group, j)
+    elseif stn.kind == :fork
+        # Instantaneous split: one sibling per branch, sharing the parent's
+        # id as group id. Clock-free, so no family entry is needed — which is
+        # itself part of charter claim F7.
+        for b in stn.branches
+            sib = st.next_id
+            st.next_id += 1
+            st.jobs[sib] = st.jobs[j]
+            st.group[sib] = j
+            deposit!(m, st, d, Int(b), sib, wl, touched, draws)
+        end
+        delete!(st.jobs, j)
+    elseif stn.kind == :join
+        # Instantaneous synchronization: stash the sibling (it stays a job in
+        # the system — a group's sojourn ends only at the merge); release one
+        # merged job through the join's route when all parts have arrived.
+        g = get(st.group, j, JobId(0))
+        g == 0 && error("job $j reached join $(stn.name) without a fork group")
+        sibs = get!(st.pending[d], g, JobId[])
+        push!(sibs, j)
+        if length(sibs) == stn.parts
+            merged = st.next_id
+            st.next_id += 1
+            st.jobs[merged] = st.jobs[j]
+            for sib in sibs
+                delete!(st.jobs, sib)
+                delete!(st.group, sib)
+            end
+            delete!(st.pending[d], g)
+            d2 = routejob!(m, st, d, merged, draws)
+            deposit!(m, st, d, d2, merged, wl, touched, draws)
+        end
     elseif stn.kind == :station
         if length(st.buf[d]) >= stn.capacity
             # A source has no server to hold a blocked job, so an external
@@ -315,9 +348,9 @@ function file_into_buffer!(m::QueueGSMP, st::QueueState, q::Int, j::JobId)
     elseif disc.insert == :front
         pushfirst!(st.buf[q], j)
     elseif disc.insert == :ordered
-        v = _byval(m, st, disc, j)
+        v = _ordval(m, st, disc, q, j)
         # Insert after equal keys: FCFS within a priority class.
-        vals = [_byval(m, st, disc, x) for x in st.buf[q]]
+        vals = [_ordval(m, st, disc, q, x) for x in st.buf[q]]
         insert!(st.buf[q], searchsortedlast(vals, v) + 1, j)
     else
         error("unknown insert $(disc.insert)")
@@ -326,6 +359,14 @@ end
 
 _byval(m, st, disc::Discipline, j::JobId) =
     evalexpr(disc.by, m.params, nothing, st.jobs[j], 0.0)
+
+function _ordval(m, st, disc::Discipline, q::Int, j::JobId)
+    v = _byval(m, st, disc, j)
+    disc.name == :srpt || return v
+    k = (:service, Int32(q), j)
+    haskey(st.te, k) && return v - (st.time - st.te[k])
+    v - get(st.bank, k, 0.0)
+end
 
 # Under processor sharing every job is in service; `servers` is the shared
 # capacity in the speed min(1, servers/n), not a slot count.
@@ -364,10 +405,10 @@ function settle!(m::QueueGSMP, st::QueueState, q::Int, t::Float64,
     # the family_memory policy, applied when the derived deltas disable it.
     if disc.preempt && disc.by !== nothing
         while _freeslots(m, st, q) == 0 && !isempty(st.buf[q]) && !isempty(st.srv[q])
-            wbest = _byval(m, st, disc, st.buf[q][1])
-            vi = argmax([_byval(m, st, disc, j) for j in st.srv[q]])
+            wbest = _ordval(m, st, disc, q, st.buf[q][1])
+            vi = argmax([_ordval(m, st, disc, q, j) for j in st.srv[q]])
             victim = st.srv[q][vi]
-            wbest < _byval(m, st, disc, victim) || break
+            wbest < _ordval(m, st, disc, q, victim) || break
             deleteat!(st.srv[q], vi)
             file_into_buffer!(m, st, q, victim)
         end

@@ -53,13 +53,18 @@ Charter scoreboard (claims in the notes' §7 tables):
   `spa_gradient` matches finite differences on M/M/1 occupancy, with SPA's
   `fire` call sites now time-threaded in ClockGradients. Draw-free models
   only — the factory refuses marks/probabilistic/SIRO, by design.
-- **Partially exercised:** F1 (preempt-`:resume` banking is tested; SRPT
-  itself is unimplemented), F7 (M/M/1, SITA, preemptive priority, M/M/1+M,
-  PS run; fork–join remains).
+- **Tested and holding (F1 and F7 complete):** SRPT — the ordering key is
+  remaining size read from the A1 bookkeeping (`te` live, `bank` banked);
+  exact deterministic preemption trace with Dirac sizes, the M/D/1
+  degeneracy (equal sizes never preempt, Pollaczek–Khinchine CV=0 mean),
+  the SRPT-undercuts-FCFS optimality inequality with paired seeds, and
+  exact replay through banking. Fork–join — clock-free `:fork`/`:join`
+  station kinds through `deposit!` (no new clock family, sharpening F7);
+  matches the Flatto–Hahn k=2 exact mean via Little's law on groups in
+  system; joins never hold complete groups; exact replay.
 - **Pending:** SPA on PS (refused upstream by its own multi-segment guard);
   IPA over PS records (untested); branch worlds for models with auxiliary
-  draws (needs clone/rekey semantics for keyed draw streams — open design);
-  fork–join; SRPT.
+  draws (needs clone/rekey semantics for keyed draw streams — open design).
 
 F2's structural half was a genuine falsification-and-repair: hand-emitted
 deltas would have required interpreter surgery for patience clocks, so delta
