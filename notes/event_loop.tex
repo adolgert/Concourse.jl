@@ -317,33 +317,47 @@ itself should never grow.
 \section{Phase 2: the processor-sharing compilation (F8)}
 \label{sec:ps}
 
-Implemented July 17, 2026. Three findings, one of them a deliberate
-departure from \code{queue\_layers.tex}.
+Implemented July 17, 2026. Three findings, and one normative rule the
+implementation surfaced, stated first because it governs the rest.
 
-\textbf{The anchor convention.} \code{queue\_layers.tex}~\S3.5 compiled a
-speed change as a re-enabling \emph{anchored at the current time}, with the
-banked age moved into a left truncation and an explicit warning against
-also keeping the original enabling time. Concourse does the opposite:
-\code{te} stays at the original enabling forever, and a speed change is a
-\emph{mid-flight re-evaluation} of the clock's wall-time law
+\textbf{The declaration rule (normative).} A model's entire specification
+for an enabled clock is the pair $(F, t_e)$, re-declarable only at event
+times. Its meaning is fixed by the conditional law: given the history up to
+the current time $t$, the firing time is distributed as $t_e + X$,
+$X \sim F$, conditioned on $t_e + X > t$. Nothing else crosses the
+interface --- not a speed, not an age, not how the sampler realizes the
+draw (retention and coupling are the sampler's construction-time
+properties; the context forwards neither). ``Speed'' is a modeling-side
+device used to \emph{construct} the declared $F$; per
+\code{queue\_layers.tex} decision~\#1 it compiles away, and here it did:
+\code{bank} and \code{anchor} never reach the sampler. Two declarations
+with the same conditional law are the same model. In particular, at a
+PS change at time $t^\ast$ with internal age $a$ and new rate $r$,
 \[
-\text{age} \;\sim\; \text{shift} + (X - a)/r
-\;\Big|\; X > a,
-\qquad X \sim F,\; \text{shift} = \text{anchor} - t_e,
+\big(F_A,\ t^\ast\big),\quad F_A = \tfrac{X-a}{r}\,\big|\,X>a
+\qquad\text{and}\qquad
+\big(F_B,\ t_e\big),\quad F_B = (t^\ast - t_e) + \tfrac{X-a}{r}\,\big|\,X>a
 \]
-carried by the state's \code{bank} (internal age $a$ at the last change)
-and \code{anchor} (that change's wall time) — an A1 addendum. The reason is
-the ClockGradients contract: the Bookkeeper reconstructs \code{te} as the
-enabling firing's time, the score replay accumulates piecewise survival
-against distributions anchored at that fixed \code{te}, and the segment
-machinery (CG-M3) exists precisely to represent re-evaluations at constant
-anchor. Under the anchor-at-now convention every speed change would
-invalidate the reconstructed \code{te} and the whole estimation stack;
-under the fixed-anchor convention it composes with no changes at all. The
-sampler side is the age-keeping \code{reenable!} (\code{relative\_te =
-te − now} $\le 0$), which CompetingClocks documents as exactly this case.
-The interpreter did not change: the \code{:reenable} branch it already had
-for D1 computes that shift.
+both put the firing at $t^\ast + (X-a)/r$ given $X > a$: the
+anchored-at-now form of \code{queue\_layers.tex}~\S3.5 and the fixed-anchor
+form implemented here are the \emph{same conditional law}, and the F8 test
+``the two anchor parameterizations declare the same conditional law'' pins
+the identity numerically. The choice between them is therefore not
+semantics but \emph{which sufficient statistics the state records}, and
+that choice is forced by the replay bookkeeping: the ClockGradients
+Bookkeeper reconstructs $t_e$ from the enabled rule and holds it fixed
+while a clock stays enabled, the score replay accumulates piecewise
+survival against distributions at that fixed anchor, and the segment
+machinery (CG-M3) represents exactly re-declarations at constant $t_e$.
+
+\textbf{The state carries $(a, \text{anchor})$, an A1 addendum.} The
+implemented declaration is the fixed-anchor $F_B$ above, built from
+\code{bank} (internal age $a$ at the last re-declaration) and \code{anchor}
+(that re-declaration's wall time). The sampler side is the age-keeping
+\code{reenable!} (\code{relative\_te = te − now} $\le 0$), which
+CompetingClocks documents as exactly this case. The interpreter did not
+change: the \code{:reenable} branch it already had for D1 computes that
+shift.
 
 \textbf{The re-evaluation hook.} The derived-delta pass (\S\ref{sec:derived})
 gained its promised explicit-\code{:reenable} seam:

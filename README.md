@@ -39,9 +39,12 @@ Charter scoreboard (claims in the notes' §7 tables):
   distinct Pollaczek–Khinchine mean; replay reproduces `bank`/`anchor`
   exactly; resident-count changes emit `:reenable` for every survivor; and
   the score gradient matches finite differences through genuine mid-flight
-  segment chains. See `notes/event_loop.tex` §6 for the fixed-anchor
-  convention (a deliberate departure from `queue_layers.tex` §3.5) and the
-  dual-safe `SharedRemaining` distribution it required.
+  segment chains. See `notes/event_loop.tex` §6 for the normative
+  declaration rule — a clock's specification is the pair (F, te) through
+  its conditional law; `queue_layers.tex` §3.5's anchor-at-now form and the
+  fixed-anchor form the state records are the same law (pinned by test),
+  the parameterization chosen because the replay bookkeeping holds te
+  fixed — and for the dual-safe `SharedRemaining` distribution.
 - **Partially exercised:** F1 (preempt-`:resume` banking is tested; SRPT
   itself is unimplemented), F7 (M/M/1, SITA, preemptive priority, M/M/1+M,
   PS run; fork–join remains).

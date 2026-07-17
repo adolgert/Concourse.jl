@@ -5,6 +5,7 @@
 # age, anchor, or speed breaks immediately.
 
 import ClockGradients
+using Distributions
 
 function mm1_ps()
     net = QueueNetwork(param_names = (:lambda, :mu))
@@ -27,6 +28,26 @@ function mg1_ps()
     route!(net, :arrive, Always(:cpu))
     route!(net, :cpu, Always(:done))
     compile(net)
+end
+
+wanted("the two anchor parameterizations declare the same conditional law") &&
+@testset "the two anchor parameterizations declare the same conditional law" begin
+    # The declaration rule (event_loop.tex §6): a clock's specification is
+    # the pair (F, te) through its conditional law, so the anchored-at-now
+    # compilation of queue_layers.tex §3.5 and the fixed-anchor form the
+    # state records must agree pointwise as laws of the firing time. The
+    # at-now side is built from Distributions' own truncated/affine algebra
+    # so the two sides share no implementation.
+    for F in (Exponential(0.7), Gamma(2.0, 0.5), Weibull(1.3, 0.8)),
+        (a, r) in ((0.4, 0.5), (1.1, 2.0), (0.0, 1 / 3))
+        te = 1.0; tstar = 3.2
+        fixed = Concourse.SharedRemaining(F, a, r, tstar - te)
+        atnow = a == 0.0 ? F * (1 / r) : (truncated(F; lower = a) - a) * (1 / r)
+        for s in (tstar + 0.05, tstar + 0.7, tstar + 3.0)
+            @test logccdf(fixed, s - te) ≈ logccdf(atnow, s - tstar) atol = 1e-12
+            @test logpdf(fixed, s - te) ≈ logpdf(atnow, s - tstar) atol = 1e-12
+        end
+    end
 end
 
 wanted("f8 mm1-ps mean number in system matches rho/(1-rho)") &&
