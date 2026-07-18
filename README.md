@@ -2,6 +2,8 @@
 
 [![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://computingkitchen.com/Concourse.jl/dev/)
 [![Docs build](https://github.com/adolgert/Concourse.jl/actions/workflows/docs.yml/badge.svg)](https://github.com/adolgert/Concourse.jl/actions/workflows/docs.yml)
+[![CI](https://github.com/adolgert/Concourse.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/adolgert/Concourse.jl/actions/workflows/CI.yml)
+[![Coverage](https://codecov.io/gh/adolgert/Concourse.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/adolgert/Concourse.jl)
 
 Concourse builds queueing-network models, compiles each one to a generalized
 semi-Markov process (GSMP), simulates it with
@@ -42,9 +44,27 @@ Pkg.add(url = "https://github.com/adolgert/ClockGradients.jl")
 Pkg.add(url = "https://github.com/adolgert/Concourse.jl")
 ```
 
+## Limitations
+
+Mark laws that read a parameter are refused under branching worlds
+(`branch_world` raises an `ArgumentError`): a θ-dependent mark law would
+add a derivative term of its own to every estimator, and that term is not
+implemented. The
+[branching manual page](https://computingkitchen.com/Concourse.jl/dev/manual/branching/)
+covers what is and is not admitted.
+
 ## Documentation
 
 The [documentation](https://computingkitchen.com/Concourse.jl/dev/) has a
 queueing tutorial taught through simulations, a research manual (records and
 replay, trajectory splitting, gradient estimation), an API reference, and a
 developer section on the design. The original design notes live in `notes/`.
+
+## Formatting
+
+Code style is configured in `.JuliaFormatter.toml` (blue style). Format with
+`using JuliaFormatter; format(".")` before submitting changes.
+
+## License
+
+Concourse is MIT licensed.

@@ -37,20 +37,26 @@ function bcmp_hpc()
     compile(net)
 end
 
-# Time-averaged number present at every station, in ONE replay pass — the
-# replay dominates the testset's cost.
+# Time-averaged number present at every station, in ONE streaming fold of
+# fire_changes over the record. Materializing the whole trajectory with
+# replay holds ~50k states at once, which OOMs a CI runner under coverage;
+# the fold keeps one.
 function bcmp_station_means(m, rec, stations)
-    sts = replay(m, rec)
-    times = vcat(rec.time, rec.horizon)
+    occupancy(st, s) = length(st.buf[s]) + length(st.srv[s]) + length(st.hold[s])
+    st = initial_state(m)
     tot = Dict(s => 0.0 for s in stations)
-    t0 = 0.0
-    for (i, t) in enumerate(times)
-        dt = t - t0
+    tprev = 0.0
+    for i in eachindex(rec.key)
+        dt = rec.time[i] - tprev
         for s in stations
-            tot[s] += dt * (length(sts[i].buf[s]) + length(sts[i].srv[s]) +
-                            length(sts[i].hold[s]))
+            tot[s] += dt * occupancy(st, s)
         end
-        t0 = t
+        ds = Concourse.replaydraws(rec.key[i], rec.draws[i], m.params)
+        st, _ = fire_changes(m, st, rec.key[i], rec.time[i], ds)
+        tprev = rec.time[i]
+    end
+    for s in stations
+        tot[s] += (rec.horizon - tprev) * occupancy(st, s)
     end
     Dict(s => v / rec.horizon for (s, v) in tot)
 end

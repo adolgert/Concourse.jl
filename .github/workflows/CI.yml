@@ -1,0 +1,59 @@
+name: CI
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  # Skip intermediate builds: always.
+  # Cancel intermediate builds: only if it is a pull request build.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
+      actions: write
+      contents: read
+    env:
+      JULIA_PKG_SERVER_REGISTRY_PREFERENCE: eager
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1'
+        os:
+          - ubuntu-latest
+        arch:
+          - x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v2
+      - name: Install unregistered dependencies
+        # Same one-develop-call pattern as docs.yml: each Pkg operation
+        # re-resolves the whole project, so both unregistered/URL deps must
+        # land in a single call. CompetingClocks by URL guarantees the needed
+        # version regardless of registry lag.
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.develop([
+                PackageSpec(url = "https://github.com/adolgert/CompetingClocks.jl"),
+                PackageSpec(url = "https://github.com/adolgert/ClockGradients.jl"),
+            ])
+            Pkg.instantiate()'
+      - uses: julia-actions/julia-runtest@v1
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

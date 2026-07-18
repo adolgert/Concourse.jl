@@ -73,7 +73,10 @@ function clock_distribution(m::QueueGSMP, θ::AbstractVector, key::ClockKey,
 end
 
 function family_law(::Val{:arrival}, m, θ, key, st)
-    builddist(m.stations[key[2]].service, m.params, θ, NamedTuple(), st.te[key])
+    # An :arrival clock exists only for a source, and every source is
+    # compiled with its interarrival law in the service slot.
+    builddist(m.stations[key[2]].service::AbstractLaw, m.params, θ, NamedTuple(),
+              st.te[key])
 end
 
 # The wall-time law of a shared job, anchored at the ORIGINAL te: given
@@ -122,7 +125,8 @@ Distributions.partype(d::SharedRemaining) = Distributions.partype(d.base)
 
 function family_law(::Val{:service}, m, θ, key, st)
     stn = m.stations[key[2]]
-    F = builddist(stn.service, m.params, θ, st.jobs[key[3]], st.te[key])
+    # A :service clock exists only where compile stored a service law.
+    F = builddist(stn.service::AbstractLaw, m.params, θ, st.jobs[key[3]], st.te[key])
     stn.discipline.name == :ps || return F
     # Speed changes compile to mid-flight re-evaluations of this value with
     # te fixed — the contract's segment convention, not a te rewrite.
@@ -135,7 +139,9 @@ function family_law(::Val{:service}, m, θ, key, st)
 end
 
 function family_law(::Val{:patience}, m, θ, key, st)
-    builddist(m.stations[key[2]].patience, m.params, θ, st.jobs[key[3]], st.te[key])
+    # A :patience clock exists only where compile stored a patience law.
+    builddist(m.stations[key[2]].patience::AbstractLaw, m.params, θ, st.jobs[key[3]],
+              st.te[key])
 end
 
 # What a disabled-without-firing clock remembers, per family. The generic

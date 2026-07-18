@@ -15,7 +15,7 @@ for file in ["test_mm1.jl", "test_replay.jl", "test_splits.jl",
              "test_blocking.jl", "test_checks.jl", "test_samplers.jl",
              "test_reneging.jl", "test_ps.jl", "test_forkjoin.jl",
              "test_srpt.jl", "test_gradients.jl", "test_branch.jl",
-             "test_bcmp.jl"]
+             "test_bcmp.jl", "test_quality.jl"]
     path = joinpath(@__DIR__, file)
     isfile(path) && include(path)
 end
