@@ -48,3 +48,8 @@ The [documentation](https://computingkitchen.com/Concourse.jl/dev/) has a
 queueing tutorial taught through simulations, a research manual (records and
 replay, trajectory splitting, gradient estimation), an API reference, and a
 developer section on the design. The original design notes live in `notes/`.
+
+## Formatting
+
+Code style is configured in `.JuliaFormatter.toml` (blue style). Format with
+`using JuliaFormatter; format(".")` before submitting changes.

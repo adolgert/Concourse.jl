@@ -1,0 +1,8 @@
+# See https://domluna.github.io/JuliaFormatter.jl/stable/ for a list of options
+style = "blue"
+indent=4
+margin=100
+trailing_comma=true
+always_for_in=true
+long_to_short_function_def=true
+remove_extra_newlines = false
