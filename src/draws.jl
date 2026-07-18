@@ -26,10 +26,11 @@ function replaydraws(firing::ClockKey, recorded::DrawList, params)
 end
 
 function _next_recorded(ds::DrawSource, purpose::Symbol)
+    replay = ds.replay::DrawList   # only replay sources reach here
     ds.ri += 1
-    ds.ri <= length(ds.replay) ||
+    ds.ri <= length(replay) ||
         error("replay of $(ds.firing) asked for draw $purpose beyond the record")
-    p = ds.replay[ds.ri]
+    p = replay[ds.ri]
     p.first == purpose ||
         error("replay of $(ds.firing) wanted $(p.first), fire asked for $purpose")
     p.second
@@ -41,7 +42,10 @@ end
 # own streams already have.
 function draw!(ds::DrawSource, purpose::Symbol, dist)
     ds.replay === nothing || return _next_recorded(ds, purpose)
-    rng = CompetingClocks.stream_for!(ds.streams, (ds.firing, purpose))
+    # A live source always carries streams (livedraws is the only non-replay
+    # constructor).
+    streams = ds.streams::CompetingClocks.KeyedStreams{StreamKey}
+    rng = CompetingClocks.stream_for!(streams, (ds.firing, purpose))
     v = Float64(rand(rng, dist))
     push!(ds.consumed, purpose => v)
     v
@@ -51,8 +55,11 @@ end
 function drawmark!(ds::DrawSource, name::Symbol, law::AbstractLaw,
                    marks::NamedTuple, te::Float64)
     ds.replay === nothing || return _next_recorded(ds, name)
-    dist = builddist(law, ds.params, ds.θ, marks, te)
-    rng = CompetingClocks.stream_for!(ds.streams, (ds.firing, name))
+    # Live sources carry streams and θ; replay returned above, so θ never
+    # enters this evaluation path with `nothing`.
+    dist = builddist(law, ds.params, ds.θ::AbstractVector, marks, te)
+    streams = ds.streams::CompetingClocks.KeyedStreams{StreamKey}
+    rng = CompetingClocks.stream_for!(streams, (ds.firing, name))
     v = Float64(rand(rng, dist))
     push!(ds.consumed, name => v)
     v

@@ -572,8 +572,10 @@ function stability(m::QueueGSMP, θ::AbstractVector)
     λ = zeros(n)
     for (s, stn) in enumerate(m.stations)
         stn.kind == :source || continue
-        reads_marks(stn.service) == Set{Symbol}() || continue
-        λ[s] = 1 / mean(builddist(stn.service, m.params, θ, NamedTuple(), 0.0))
+        svc = stn.service
+        svc === nothing && continue
+        reads_marks(svc) == Set{Symbol}() || continue
+        λ[s] = 1 / mean(builddist(svc, m.params, θ, NamedTuple(), 0.0))
     end
     # Traffic equations λ = inj + Pᵀλ along :always and :probabilistic
     # kernels (ByMark/RoundRobin splits are statically unknown), by fixpoint
@@ -606,8 +608,10 @@ function stability(m::QueueGSMP, θ::AbstractVector)
     out = Tuple{Symbol,Float64}[]
     for (s, stn) in enumerate(m.stations)
         stn.kind == :station || continue
-        reads_marks(stn.service) == Set{Symbol}() || continue
-        ρ = λ[s] * mean(builddist(stn.service, m.params, θ, NamedTuple(), 0.0)) /
+        svc = stn.service
+        svc === nothing && continue
+        reads_marks(svc) == Set{Symbol}() || continue
+        ρ = λ[s] * mean(builddist(svc, m.params, θ, NamedTuple(), 0.0)) /
             stn.servers
         push!(out, (stn.name, ρ))
         ρ >= 1 && @warn "station $(stn.name) is unstable at this θ" ρ
