@@ -1,6 +1,6 @@
 # Concourse.jl
 
-[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://adolgert.github.io/Concourse.jl/dev/)
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://computingkitchen.com/Concourse.jl/dev/)
 [![Docs build](https://github.com/adolgert/Concourse.jl/actions/workflows/docs.yml/badge.svg)](https://github.com/adolgert/Concourse.jl/actions/workflows/docs.yml)
 
 Concourse builds queueing-network models, compiles each one to a generalized
@@ -44,7 +44,7 @@ Pkg.add(url = "https://github.com/adolgert/Concourse.jl")
 
 ## Documentation
 
-The [documentation](https://adolgert.github.io/Concourse.jl/dev/) has a
+The [documentation](https://computingkitchen.com/Concourse.jl/dev/) has a
 queueing tutorial taught through simulations, a research manual (records and
 replay, trajectory splitting, gradient estimation), an API reference, and a
 developer section on the design. The original design notes live in `notes/`.

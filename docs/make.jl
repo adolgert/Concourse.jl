@@ -9,7 +9,7 @@ makedocs(
     modules = [Concourse],
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", nothing) == "true",
-        canonical = "https://adolgert.github.io/Concourse.jl",
+        canonical = "https://computingkitchen.com/Concourse.jl",
         edit_link = "main",
         assets = String[],
     ),
