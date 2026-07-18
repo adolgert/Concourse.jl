@@ -3,6 +3,20 @@
 # order. Every statistic is a fold of fire over it; replay conditions on the
 # draws, which is what makes the fold deterministic (F4).
 
+"""
+    MarkedRecord
+
+What a simulation produces: for each firing, the clock key (`key`), the
+firing time (`time`), and the auxiliary draws that firing consumed in
+consumption order (`draws`, a vector of `purpose => value` pairs per
+firing), plus the `horizon` the run covered. `length(rec)` is the number of
+firings.
+
+The record is the primary observable. Every statistic is a fold of
+[`fire_changes`](@ref) over it, and because the draws are recorded,
+[`replay`](@ref) reproduces the exact state trajectory without touching a
+random number generator or the parameter vector.
+"""
 mutable struct MarkedRecord
     key::Vector{ClockKey}
     time::Vector{Float64}
@@ -40,7 +54,15 @@ end
     time_average(g, m, rec) -> Float64
 
 The time average of `g(state)` over `[0, horizon]`, exact between events
-because the state is constant there.
+because the state is constant there. `g` maps a [`QueueState`](@ref) to a
+number, for example [`number_in_system`](@ref).
+
+# Example
+
+```julia
+rec = simulate(m, θ, 2000.0; seed = 1)
+L = time_average(number_in_system, m, rec)   # mean number in system
+```
 """
 function time_average(g::Function, m::QueueGSMP, rec::MarkedRecord)
     st = initial_state(m)
@@ -56,5 +78,12 @@ function time_average(g::Function, m::QueueGSMP, rec::MarkedRecord)
     acc / rec.horizon
 end
 
+"""
+    number_in_system(st::QueueState) -> Int
+
+The number of jobs in the system: every live job, whether waiting, in
+service, held blocked, or stashed at a join. Pass it to
+[`time_average`](@ref) to estimate L, the time-average number in system.
+"""
 number_in_system(st::QueueState) = length(st.jobs)
 number_at(q::Int) = st::QueueState -> length(st.buf[q]) + length(st.srv[q]) + length(st.hold[q])

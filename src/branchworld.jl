@@ -20,6 +20,22 @@
 # term to every estimator (design brief Q1's separable sub-question).
 # Routing weights and SIRO selection are θ-free by construction.
 
+"""
+    ConcourseWorld
+
+A branchable simulation world: the compiled model, its parameter values,
+the current state, a CompetingClocks.jl sampling context, and keyed streams
+for auxiliary draws. It implements ClockGradients.jl's branchable-world
+protocol (`branch_peek`, `branch_commit!`, `branch_force!`,
+`branch_clone`, `branch_rekey!`, and the rest), which admits the
+clone-based estimators such as `ClockGradients.branching_gradient`. Build
+one with [`branch_world`](@ref).
+
+A clone carries the auxiliary generators' states, so an unrekeyed clone's
+future is bit-for-bit the original's. After `branch_rekey!`, same-seed
+clones still agree on corresponding jobs' draws, because each draw is keyed
+by the clock it belongs to, never by a position in a global call sequence.
+"""
 mutable struct ConcourseWorld{C}
     m::QueueGSMP
     θ::Vector{Float64}
@@ -45,10 +61,26 @@ end
 """
     branch_world(m, θ; seed, method=NextReactionMethod()) -> ConcourseWorld
 
-An initialized, ready-to-peek branchable world at primal `θ`. The default
-sampler method caches its `next` reservation, which the protocol's
-peek-repeatability obligation requires; a redraw-at-next method would fail
-`check_branchable` honestly.
+An initialized, ready-to-peek branchable world for model `m` at parameter
+vector `θ`. `seed` seeds both the sampler's clock streams and the world's
+auxiliary streams. The default sampler method caches its `next`
+reservation, which the protocol's peek-repeatability obligation requires; a
+redraw-at-next method would fail `ClockGradients.check_branchable`
+honestly.
+
+Marks, [`Probabilistic`](@ref) routing, and [`SIRO`](@ref) are admitted
+because their draws are θ-free. A mark law that reads a parameter is
+refused with an `ArgumentError`: its own derivative would add a term to
+every estimator, and that term is not implemented.
+
+# Example
+
+```julia
+res = ClockGradients.branching_gradient(
+    () -> branch_world(m, θ; seed = 81), θ,
+    st -> Float64(number_in_system(st));
+    nreps = 1200, horizon = 5.0, seed = 17, branch_rng_seed = 18)
+```
 """
 function branch_world(m::QueueGSMP, θ::AbstractVector; seed::Integer,
                       method=NextReactionMethod())

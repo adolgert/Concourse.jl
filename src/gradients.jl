@@ -11,12 +11,50 @@
 # estimators continue past any record): fire then runs with an empty draw
 # source, so a model whose fire consumes auxiliary randomness fails loudly
 # instead of replaying stale draws. Only draw-free models may branch.
+"""
+    ReplayModel
+
+Concourse's implementation of the ClockGradients.jl model contract: a
+[`QueueGSMP`](@ref) bound to a source of auxiliary draws, so the contract's
+θ-free `fire` can reproduce mark and routing draws indexed by the state's
+own firing counter. Build one with [`replay_model`](@ref) (bound to a
+record) or [`live_model`](@ref) (no record, for draw-free models). Pass it
+to `ClockGradients.gradient_record`, `score_gradient`, `ipa_gradient`, and
+`spa_gradient`.
+"""
 struct ReplayModel
     m::QueueGSMP
     draws::Union{Nothing,Vector{DrawList}}
 end
 
+"""
+    replay_model(m::QueueGSMP, rec::MarkedRecord) -> ReplayModel
+
+Bind the model to the auxiliary draws of one record, for gradient
+estimation over that record. Replaying the draws keeps `fire` deterministic
+and free of `θ`, which the ClockGradients.jl estimators require.
+
+# Example
+
+```julia
+rec = simulate(m, θ, horizon; seed = 1)
+rm = replay_model(m, rec)
+grec = ClockGradients.gradient_record(rm, rec, θ)
+ClockGradients.score_gradient(rm, θ, grec)
+```
+"""
 replay_model(m::QueueGSMP, rec::MarkedRecord) = ReplayModel(m, rec.draws)
+
+"""
+    live_model(m::QueueGSMP) -> ReplayModel
+
+The off-record binding, for estimators that continue past any record, such
+as `ClockGradients.spa_gradient` (SPA = smoothed perturbation analysis).
+`fire` runs with an empty draw source, so this binding works only for
+models that consume no auxiliary randomness — no marks, no
+[`Probabilistic`](@ref) routing, no [`SIRO`](@ref). A model that asks for a
+draw fails loudly instead of replaying stale values.
+"""
 live_model(m::QueueGSMP) = ReplayModel(m, nothing)
 
 function _model_draws(rm::ReplayModel, key::ClockKey, st::QueueState)

@@ -3,13 +3,32 @@
 # source, everything observable is the record. This loop should never grow.
 
 """
-    simulate(m, θ, horizon; seed, method=nothing, worklist=:fifo,
+    simulate(m, θ, horizon; seed=0, method=nothing, worklist=:fifo,
              debug=false, keep_states=false) -> MarkedRecord
 
-`method=nothing` lets CompetingClocks' builder choose the sampler (D4); pass
-a `SamplerSpec` (e.g. `FirstToFireMethod()`) to override. `debug=true` runs
-the F11 membership oracle after every firing. `keep_states=true` also returns
-the live state trajectory for comparison against `replay` (F4).
+Run the compiled model `m` at parameter vector `θ` until the next firing
+would pass `horizon`, and return the [`MarkedRecord`](@ref) of what fired.
+
+- `θ`: parameter values, ordered as the network's `param_names`.
+- `seed`: seeds the master random number generator. The same seed gives the
+  same record.
+- `method`: `nothing` lets CompetingClocks.jl's builder choose the sampler;
+  pass `FirstToFireMethod()`, `NextReactionMethod()`, or
+  `FirstReactionMethod()` to override.
+- `worklist`: order of the settle cascade, `:fifo` or `:lifo`. Both reach
+  the same fixed point.
+- `debug`: after every firing, recompute the enabled clock set from the
+  state and compare it against the sampler; error on drift.
+- `keep_states`: also return the live state trajectory, as
+  `(record, states)`, for comparison against [`replay`](@ref).
+
+# Example
+
+```julia
+m = compile(net)                          # an M/M/1 with θ = (λ, μ)
+rec = simulate(m, [1.0, 2.0], 2000.0; seed = 7)
+time_average(number_in_system, m, rec)    # near ρ/(1-ρ) = 1
+```
 """
 function simulate(m::QueueGSMP, θ::AbstractVector, horizon::Real;
                   seed::Integer=0, method=nothing, worklist::Symbol=:fifo,

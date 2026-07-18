@@ -5,3 +5,6 @@ notes/*.fls
 notes/*.log
 notes/*.out
 notes/*.toc
+docs/build/
+docs/Manifest.toml
+.DS_Store

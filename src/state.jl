@@ -2,9 +2,38 @@
 # enabled clocks, banked ages for :resume-disabled ones — because they
 # determine future behavior. The sampler is a pure consumer of them.
 
+"""
+    ClockKey
+
+The identity of a clock: a tuple `(family, station, job)`. `family` is the
+clock family — `:arrival`, `:service`, or `:patience`. `station` is the
+station index in the compiled model. `job` is the job id, or `0` for an
+arrival clock, which belongs to the source rather than to a job. Clock keys
+appear in [`MarkedRecord`](@ref)s, in the deltas of
+[`fire_changes`](@ref), and as sampler keys.
+"""
 const ClockKey = Tuple{Symbol,Int32,Int64}
 const JobId = Int64
 
+"""
+    QueueState
+
+The complete state of a queueing simulation between firings. It holds the
+wall-clock `time`, the count `nfired` of firings so far, the next job id,
+and per-station vectors of job ids: `buf` (waiting, in discipline order),
+`srv` (in service), and `hold` (finished but blocked from transferring).
+`jobs` maps each live job id to its marks. `pending` and `group` track
+fork–join siblings, and `cursor` holds each [`RoundRobin`](@ref) kernel's
+position.
+
+The state also carries the clock bookkeeping that determines future
+behavior, so the sampler can be a pure consumer of it: `te` holds each
+enabled clock's enabling time, `bank` holds the age banked by a
+`:resume`-disabled clock, and `anchor` marks the last speed change of a
+processor-sharing clock. Fields are documented here because measurement
+functions, such as those passed to [`time_average`](@ref), read them
+directly.
+"""
 mutable struct QueueState
     time::Float64
     nfired::Int               # replay's index into the recorded draws
@@ -27,6 +56,14 @@ mutable struct QueueState
     anchor::Dict{ClockKey,Float64}
 end
 
+"""
+    initial_state(m::QueueGSMP) -> QueueState
+
+The state at time zero: no jobs anywhere, and one arrival clock enabled per
+source with enabling time `0.0`. One of the five contract functions
+(`initial_state`, [`enabled`](@ref), [`clock_distribution`](@ref),
+[`fire_changes`](@ref), [`states_equal`](@ref)).
+"""
 function initial_state(m::QueueGSMP)
     n = length(m.stations)
     st = QueueState(0.0, 0, 1,
@@ -53,6 +90,14 @@ function copystate(st::QueueState)
                copy(st.anchor))
 end
 
+"""
+    states_equal(a::QueueState, b::QueueState) -> Bool
+
+Field-by-field equality of two states, including the clock bookkeeping
+(`te`, `bank`, `anchor`). This is the equality the replay tests use to
+show that a fold of [`fire_changes`](@ref) over a record reproduces the
+live trajectory exactly. One of the five contract functions.
+"""
 function states_equal(a::QueueState, b::QueueState)
     a.time == b.time && a.nfired == b.nfired && a.next_id == b.next_id &&
         a.buf == b.buf && a.srv == b.srv && a.hold == b.hold &&

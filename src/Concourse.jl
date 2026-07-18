@@ -6,11 +6,8 @@ plain data (`QueueGSMP`), interpreted against the CompetingClocks.jl sampler
 and satisfying the ClockGradients.jl model contract for derivative
 estimation. The normative design lives in `notes/model_definition.tex` and
 `notes/event_loop.tex`, which supersede `notes/queue_layers.tex` where they
-disagree.
-
-Phase-1 code exists to run the falsification charter in
-`notes/model_definition.tex` §7 and `notes/event_loop.tex` §7, not to be a
-library.
+disagree; the code discharges the falsification charters in those notes'
+§7 tables.
 """
 module Concourse
 

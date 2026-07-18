@@ -13,6 +13,16 @@ const ClockDelta = Tuple{Symbol,ClockKey}   # (:enable | :disable | :reenable, k
 # a firing touched, never hand-emitted at the state-transition sites.
 const CLOCK_FAMILIES = (:arrival, :service, :patience)
 
+"""
+    enabled(m::QueueGSMP, st::QueueState) -> Vector{ClockKey}
+
+The keys of every clock enabled in state `st`, derived from the state
+alone: one `:arrival` clock per source, one `:service` clock per job in
+service, and one `:patience` clock per waiting job at a station with a
+patience law. One of the five contract functions. The interpreter's debug
+oracle recomputes this set after every firing and compares it against the
+sampler.
+"""
 function enabled(m::QueueGSMP, st::QueueState)
     ks = ClockKey[]
     for fam in CLOCK_FAMILIES, s in eachindex(m.stations)
@@ -43,6 +53,20 @@ function family_station_keys!(ks, ::Val{:patience}, m::QueueGSMP, st::QueueState
     nothing
 end
 
+"""
+    clock_distribution(m::QueueGSMP, θ, key::ClockKey, st::QueueState) -> Distribution
+
+The firing-time distribution of clock `key` in state `st`, measured from
+the clock's enabling time `st.te[key]`. The clock's law is evaluated with
+the parameter vector `θ`, the owning job's marks, and the enabling time.
+Under [`ProcessorSharing`](@ref) the returned distribution also folds in
+the banked age, the current speed, and the anchor of the last speed change.
+One of the five contract functions.
+
+The result's element type follows `eltype(θ)`, so a dual-number-valued `θ`
+flows through untouched — the seam ClockGradients.jl differentiates
+through.
+"""
 function clock_distribution(m::QueueGSMP, θ::AbstractVector, key::ClockKey,
                             st::QueueState)
     family_law(Val(key[1]), m, θ, key, st)
@@ -124,7 +148,16 @@ family_memory(::Val{:patience}, m, key) = :fresh
 # fire
 
 """
-    fire_changes(m, st, key, t, draws; worklist) -> (new_state, deltas)
+    fire_changes(m, st, key, t, draws; worklist=:fifo) -> (new_state, deltas)
+
+Apply the firing of clock `key` at time `t` to state `st` and return the
+new state together with the list of clock deltas — `(:enable, k)`,
+`(:disable, k)`, or `(:reenable, k)` pairs the sampler must apply. `st` is
+not mutated. `draws` is the draw source for auxiliary randomness (marks,
+routing, random selection); `worklist` (`:fifo` or `:lifo`) orders the
+settle cascade, and both orders reach the same fixed point. One of the five
+contract functions; most users reach it through [`simulate`](@ref) and
+[`replay`](@ref).
 
 Pure given the draw source: live it records, in replay it reads back. Deltas
 are DERIVED, not emitted: for every station the firing's cascade touched,

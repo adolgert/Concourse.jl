@@ -40,6 +40,40 @@ experiment below shows both facts side by side.
 
 ## The cluster
 
+```@example bcmp_diagrams
+using Luxor, QueueDiagrams, LaTeXStrings # hide
+@drawsvg begin # hide
+    background("white") # hide
+    fontface("Helvetica") # hide
+    yrow = -50 # hide
+    login = sharedserver(Point(-300, yrow), 30; jobs = [1, 2], label = "login (PS)") # hide
+    bc = Point(-175, yrow) # hide
+    b = buffer(bc, 100, 34; slots = 4, jobs = [2, 1]) # hide
+    discipline(bc, 100, 34, "sched (FCFS)") # hide
+    sv = server(Point(-95, yrow), 17; inservice = 1) # hide
+    compute = sharedserver(Point(55, yrow), 48; # hide
+                           jobs = [1, 2, 1, 2, 2, 1, 2, 1], label = "compute (64 nodes)") # hide
+    fs = sharedserver(Point(55, 105), 26; jobs = [2, 1], label = "fs (PS)") # hide
+    flow(Point(-430, yrow - 22), Point(login.entry.x - 4, yrow - 8); label = L"\lambda_{debug}") # hide
+    flow(Point(-430, yrow + 22), Point(login.entry.x - 4, yrow + 8); label = L"\lambda_{prod}") # hide
+    flow(login.exit, b.entry) # hide
+    flow(b.exit, sv.entry) # hide
+    flow(sv.exit, compute.entry) # hide
+    flow(compute.exit, Point(250, yrow); label = "0.25") # hide
+    fontsize(13); text("done", Point(262, yrow + 4)) # hide
+    flow(Point(80, yrow + 44), Point(80, 82)) # hide
+    flow(Point(30, 82), Point(30, yrow + 44)) # hide
+    fontsize(13) # hide
+    text("0.75", Point(95, 45), halign = :left) # hide
+    text("checkpoint", Point(16, 45), halign = :right) # hide
+end 900 300 # hide
+```
+
+The network: two job classes (debug in blue, production in orange) pass
+through a processor-sharing login node, a first-come-first-served
+scheduler, a 64-node compute pool, and a processor-sharing filesystem
+that jobs cycle through while checkpointing.
+
 Two classes of work arrive at a cluster:
 
 | class | arrivals | login | compute burst | checkpoint write |
@@ -95,9 +129,32 @@ route!(net, :fs, Always(:compute))
 ## The closed forms
 
 Product form makes the predictions elementary. First solve the *traffic
-equations* — each station's total arrival rate, counting revisits. With
-per-class external rates λ_c and mean visit counts (login 1, sched 1,
-compute 4, fs 3), each station's load is
+equations* — each station's total arrival rate, counting revisits. The
+checkpoint loop turns one external arrival into a geometric number of
+internal visits:
+
+```@example bcmp_diagrams
+@drawsvg begin # hide
+    background("white") # hide
+    fontface("Helvetica") # hide
+    stations = [("login", 1), ("sched", 1), ("compute", 4), ("fs", 3)] # hide
+    for (i, (name, visits)) in enumerate(stations) # hide
+        x = -240 + (i - 1) * 160 # hide
+        server(Point(x, 0), 24) # hide
+        fontsize(14) # hide
+        sethue("black") # hide
+        text(name, Point(x, -38), halign = :center) # hide
+        text("visits: $visits", Point(x, -56), halign = :center) # hide
+        i < 4 && flow(Point(x + 26, 0), Point(x + 134, 0)) # hide
+    end # hide
+    feedback(Point(240, 26), Point(80, 30); drop = 85) # hide
+    fontsize(14); sethue("black") # hide
+    text("p = 0.75", Point(160, 128), halign = :center) # hide
+end 700 260 # hide
+```
+
+With per-class external rates λ_c and those mean visit counts (login 1,
+sched 1, compute 4, fs 3), each station's load is
 
     ρ = Σ_c λ_c · (visits) · (mean service of class c).
 
