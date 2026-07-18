@@ -25,13 +25,15 @@ jobs:
       - name: Install docs dependencies
         # ClockGradients.jl is unregistered, and Concourse and QueueDiagrams
         # are developed from the checkout, so the docs Manifest is built here
-        # rather than committed.
+        # rather than committed. All four unregistered packages must land in
+        # ONE develop call: each Pkg operation re-resolves the whole project,
+        # and any package still missing at that point aborts the resolve.
         run: |
           julia --project=docs -e '
             using Pkg
-            Pkg.add(url = "https://github.com/adolgert/CompetingClocks.jl")
-            Pkg.add(url = "https://github.com/adolgert/ClockGradients.jl")
             Pkg.develop([
+                PackageSpec(url = "https://github.com/adolgert/CompetingClocks.jl"),
+                PackageSpec(url = "https://github.com/adolgert/ClockGradients.jl"),
                 PackageSpec(path = pwd()),
                 PackageSpec(path = joinpath(pwd(), "docs", "QueueDiagrams")),
             ])
