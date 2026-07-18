@@ -1,0 +1,686 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1.1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\DeclareUnicodeCharacter{03B8}{\ensuremath{\theta}}
+\DeclareUnicodeCharacter{2212}{\ensuremath{-}}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newtheorem{claim}{Claim}
+
+\title{Smoothed Perturbation Analysis, From the Beginning\\
+\large The derivation, the estimator we implement, and what re-declared
+clocks change}
+\author{Concourse research notes}
+\date{July 17, 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%==============================================================================
+\section{What this document is}
+
+The design conversation asked for a derivation. SPA works in Concourse
+today for models whose clocks keep one distribution for life, and it
+refuses records that contain re-declared clocks, because the mathematics
+for that case had not been worked out. This document is the first step of
+working it out, following the process the project uses for such
+questions: write the original derivation carefully, with notation defined
+and with the reason for each step stated, and only then ask what changes
+when clocks are re-declared. Books and articles on SPA are terse. This
+report is deliberately not.
+
+The document also folds in what the Question 3 experiments discovered
+while it was being written. Those experiments were supposed to be a
+side check on the pathwise estimator. Instead they located a structural
+gap that sits underneath both the pathwise estimator and SPA, and the
+multi-segment part of this report is organized around that finding.
+
+Sections 2 through 4 build the single-segment theory from nothing.
+Section 5 states the estimator exactly as implemented, so the theory and
+the code can be compared line by line. Sections 6 and 7 treat re-declared
+clocks: what generalizes cleanly, what breaks, a small closed-form result
+that explains the experiments, and the ladder of falsification tests that
+should gate any implementation. Section 8 collects the decisions.
+
+%==============================================================================
+\section{The setting and the notation}
+
+\subsection{The race}
+
+A generalized semi-Markov process runs as a race among clocks. The state
+is $s$. In state $s$ a set of clocks is enabled. Clock $i$ was enabled at
+time $\tau_i$ (its \emph{enabling time}) and carries a declared
+probability distribution $F_i$ for its holding time --- the time from
+$\tau_i$ until it would fire. The clock that fires first wins. Firing
+moves the state, which enables new clocks and disables others, and the
+race resumes. The model's entire statement about a clock is the pair
+$(F_i, \tau_i)$, read as the conditional law of its firing time given the
+history. Nothing else about the randomness is the model's business.
+
+Parameters $\theta \in \mathbb{R}^D$ enter in exactly one place: the
+declared distributions may depend on $\theta$, so we write
+$F_i(\cdot\,;\theta)$. The performance measure is a functional $L$ of the
+path --- a terminal reading, a time integral such as
+$\int_0^T N(t)\,dt$, or a first-passage time. We want
+$\partial_\theta \E[L]$.
+
+\subsection{The path as a deterministic map}
+
+Give clock $i$ a uniform random number $u_i$ and set its holding time by
+inversion,
+\[
+X_i \;=\; F_i^{-1}(u_i\,;\theta),
+\]
+so that $X_i$ has law $F_i$. (When a clock is disabled and later
+re-enabled, or fires repeatedly, it consumes a fresh uniform each time;
+index them $u_{i,1}, u_{i,2}, \dots$. Nothing below depends on that
+detail.) Once every uniform is fixed, the whole path is a deterministic
+function of $\theta$: each firing time, each state visit, and hence
+$L = L(\theta, u)$ where $u$ is the vector of all uniforms. The quantity
+we want is
+\[
+\frac{d}{d\theta}\,\E[L] \;=\; \frac{d}{d\theta} \int L(\theta, u)\,du .
+\]
+
+Everything in perturbation analysis is a fight about whether the
+derivative may be moved inside this integral.
+
+\subsection{Where the map is smooth and where it is not}
+
+Fix $u$ and move $\theta$ a little. Each holding time
+$X_i = F_i^{-1}(u_i;\theta)$ slides smoothly, because the inverse
+survival function of a fixed uniform is a smooth function of the
+distribution's parameters. Firing times are sums and minima of holding
+times, so they slide too. As long as the \emph{order} of firings does not
+change, the path deforms continuously: the same events happen, at
+slightly different times. On this region $L(\cdot, u)$ is typically
+differentiable, and its derivative is what the pathwise (IPA) estimator
+computes.
+
+The map is not smooth everywhere. At certain values of $\theta$ two
+firing times tie. Crossing such a value swaps the order of two events,
+and the path after the swap can be a different path entirely: a different
+job got the server, a different queue overflowed. If $L$ reads anything
+that depends on the order --- a count, an indicator, a first passage ---
+then $L(\cdot, u)$ jumps at the tie. The set of $u$ for which a tie
+happens at a given $\theta$ has probability zero, which is why the
+pathwise estimator is well defined; but the set of $u$ for which a tie
+happens \emph{somewhere near} $\theta$ has probability of order
+$\delta\theta$, and each such $u$ contributes a jump of order one. The
+product is a term of order $\delta\theta$ that pure pathwise
+differentiation cannot see:
+\[
+\frac{d}{d\theta}\,\E[L]
+\;=\;
+\underbrace{\E\!\left[\frac{\partial L}{\partial \theta}\right]}_{\text{IPA: the sliding of times}}
+\;+\;
+\underbrace{\text{(probability flux across ties)} \times \text{(jump size)}}_{\text{the boundary term IPA drops}} .
+\]
+The first term is exact when $L$ is continuous at order swaps (a time
+integral of the state usually is). The second term is the whole story for
+order-carried observables, and estimating it is what SPA is for.
+
+%==============================================================================
+\section{The smoothing idea}
+
+\subsection{Conditioning makes the discontinuity differentiable}
+
+The trick, due to Gong and Ho and developed at book length by Fu and Hu,
+is not to differentiate $L$ itself but a conditional expectation of $L$.
+Choose a \emph{characterization} $Z$: a set of random quantities that
+pins down the path except for one distinguished piece of randomness.
+Then
+\[
+\E[L] \;=\; \E\bigl[\,\E[L \mid Z]\,\bigr],
+\]
+and the inner quantity $\E[L \mid Z]$ is a function of $\theta$ that
+integrates over the distinguished randomness. Integration smooths. Where
+$L$ has a jump indicator $\mathbf{1}\{X_e < \xi\}$ in it, the conditional
+expectation has the continuous function $\Prob(X_e < \xi \mid Z)$
+instead. If the conditional expectation is differentiable in $\theta$ and
+the interchange is justified, then
+\[
+\frac{d}{d\theta}\,\E[L]
+\;=\;
+\E\!\left[\frac{d}{d\theta}\,\E[L \mid Z]\right],
+\]
+and the inner derivative now contains the boundary contribution
+explicitly, as the derivative of a probability. The estimator samples the
+inner derivative. That is the entire idea. The art is in choosing $Z$ so
+that the inner derivative is computable from one simulated path plus a
+small amount of extra work.
+
+\subsection{The characterization we use}
+
+Concourse's SPA (following Fu and Hu's GSMP treatment) applies the idea
+locally, at each firing of the simulation. Fix an epoch: the winner $e_k$
+fires at time $t_k$. Consider one other clock $e$ that was enabled at
+that moment --- a \emph{candidate} --- with enabling time $\tau_e$ and
+age
+\[
+\xi \;=\; t_k - \tau_e
+\]
+at the decision. In the realized path the candidate lost: $X_e > \xi$.
+In a nearby path it might have won, and that is the order swap whose
+boundary contribution we must capture.
+
+Condition on everything except the candidate's holding time $X_e$: all
+other uniforms, hence all other holding times, hence (up to this epoch)
+the winner's firing time $t_k$ and the candidate's enabling time
+$\tau_e$. Under this conditioning, what do we know about $X_e$? We know
+the candidate survived every earlier epoch --- at each previous firing it
+was enabled and did not fire. All those survivals are implied by the
+single statement $X_e > \xi$, because $\xi$ is its age at the latest
+decision. So the conditional law of $X_e$ given the characterization is
+its declared law conditioned on survival past $\xi$:
+\[
+\Prob(X_e \in dx \mid Z) \;=\; \frac{f_e(x;\theta)}{1 - F_e(\xi;\theta)}\,dx,
+\qquad x > \xi .
+\]
+This is why the boundary weight will be a \emph{hazard} and not a
+marginal density. The candidate is not a fresh clock; it is a clock we
+have already watched survive to age $\xi$, and every probability
+statement about it must respect that. The implementation pins this with
+an exact two-clock-race check: with the hazard weight the boundary term
+integrates to the true derivative $\lambda_b/(\lambda_a+\lambda_b)^2$ of
+a win probability; with the marginal density it integrates to the wrong
+value $\lambda_b/(2\lambda_a+\lambda_b)^2$.
+
+%==============================================================================
+\section{The single-segment derivation}
+
+\subsection{The boundary probability and its derivative}
+
+Work at one epoch with one candidate, everything else conditioned. Write
+the conditional expectation of the functional as an integral over the
+candidate's holding time $x$:
+\[
+\E[L \mid Z]
+\;=\;
+\int_{\xi(\theta)}^{\infty}
+L(x;\theta)\,
+\frac{f_e(x;\theta)}{1 - F_e(\xi(\theta);\theta)}
+\,dx .
+\]
+Three things here depend on $\theta$, and keeping them separate is the
+whole derivation. First, the integrand path $L(x;\theta)$: for $x$ away
+from $\xi$ the order is fixed and $L$ deforms smoothly --- this produces
+the IPA part, and we set it aside. Second, the density $f_e(\cdot;\theta)$
+and its normalization: these produce terms that pair up with the IPA
+part's likelihood bookkeeping and, in the implemented estimator, are
+carried by the same replay. Third --- the term we came for --- the lower
+limit $\xi(\theta)$, the boundary between ``candidate loses'' and
+``candidate wins.''
+
+Differentiating the integral at its moving lower limit gives the boundary
+contribution
+\[
+-\,\frac{f_e(\xi;\theta)}{1 - F_e(\xi;\theta)}\;
+\frac{d\xi}{d\theta}\;
+L(\xi^+;\theta)
+\;+\;
+(\text{the matching term in which the boundary point } x = \xi
+\text{ moves with the law}) .
+\]
+The second piece needs one more sentence of care. The boundary is a tie
+between two \emph{times}, not a fixed number: the candidate wins when its
+holding time, viewed at fixed uniform as $X_e(\theta)$, drops below the
+age $\xi(\theta)$. Both sides move with $\theta$. The rate at which
+probability crosses the boundary is proportional to the \emph{relative}
+velocity
+\[
+v \;=\; \frac{d\xi}{d\theta} \;-\; \frac{dX_e}{d\theta}\Big|_{X_e = \xi},
+\qquad
+\frac{dX_e}{d\theta}\Big|_{X_e=\xi}
+\;=\;
+-\,\frac{\partial_\theta F_e(\xi;\theta)}{f_e(\xi;\theta)} ,
+\]
+where the last identity is the fixed-uniform (probability-integral
+transform) derivative of $X_e = F_e^{-1}(u;\theta)$ evaluated at the
+boundary point. When $v > 0$ the age is catching up to the candidate's
+sample: order swaps flow \emph{into} the swapped configuration at rate
+$h_e(\xi)\,v$, where
+\[
+h_e(\xi) \;=\; \frac{f_e(\xi;\theta)}{1 - F_e(\xi;\theta)}
+\]
+is the hazard. When $v \le 0$ the boundary recedes and no probability
+crosses; this is why the implemented factor is $(v)^+$, the positive
+part.
+
+What multiplies the flux is the \emph{jump}: the difference between the
+functional's value on the path where the pair fired in swapped order and
+its value on the nominal path, in the limit where the holding time
+between the two firings vanishes. Call these the perturbed path (PP:
+candidate first) and the degenerated nominal path (DNP: winner first,
+candidate immediately after, if still enabled). The local boundary
+contribution at this epoch and candidate is
+\[
+\boxed{\;
+h_e(\xi)\;\Bigl(\tfrac{d\xi}{d\theta} - \tfrac{dX_e}{d\theta}\big|_{\xi}\Bigr)^{\!+}\;
+\bigl(L(\mathrm{PP}) - L(\mathrm{DNP})\bigr)
+\;}
+\]
+and the SPA estimator is the IPA term plus the sum of these
+contributions over epochs and candidates, plus one more family of terms
+at the horizon (next subsection). Summing over epochs is legitimate
+because each epoch's contribution came from conditioning on a different
+characterization; Fu and Hu's Theorem 3.3 hypotheses (differentiable
+conditional expectation, uniformly integrable difference quotients) are
+what license both the interchange and the sum.
+
+\subsection{Why the jump is estimated with a coupled clone pair}
+
+$L(\mathrm{PP})$ and $L(\mathrm{DNP})$ are values of the functional on
+two constructed continuations of the same prefix. The construction must
+respect the characterization: everything except the candidate's residual
+is held fixed, so both continuations start from the same state, fire the
+same two events at the same instant $t_k$ (in opposite orders), and then
+continue \emph{with the same future randomness}. In the implementation
+both clones branch from the pre-commit world, receive one shared rekey
+seed, force the pair in their respective orders, and run to the horizon.
+Sharing the seed makes the difference $L(\mathrm{PP}) - L(\mathrm{DNP})$
+quiet: the continuation randomness cancels and only the effect of the
+order remains. An independent-seeds version would be unbiased too, but
+its variance would swamp the term being estimated.
+
+Two structural facts reduce the cost. First, the \emph{commuting gate}:
+if firing the pair in both orders re-coalesces to the same state, with
+both events surviving in both orders, then under the characterization the
+two continuations are the same path and the jump is exactly zero --- no
+clones needed. This is a correctness statement, not just a saving: the
+clone pair in that case would return pure noise. (A first-passage
+functional needs a stronger gate, because it reads the zero-duration
+intermediate states.) Second, the \emph{horizon term}: a clock scheduled
+just past the observation time $T$ crosses into the window as $\theta$
+moves. That is a boundary with the constant $T$, so its ``decision-time
+derivative'' is zero, no clones are needed, and the jump is read directly
+off the fired state. A time integral has zero jump there (the crossing
+event occupies zero width), consistent with IPA already being exact for
+it.
+
+\subsection{The velocity factor comes from the replay}
+
+The term $d\xi/d\theta = dt_k/d\theta - d\tau_e/d\theta$ requires the
+derivative of two realized \emph{times} with the order frozen --- exactly
+what the pathwise replay computes. The implementation takes the Jacobian
+of \code{replay\_times} at the recorded path and reads off the rows for
+the winner's epoch and the candidate's enabling epoch. The term
+$dX_e/d\theta|_\xi$ comes from the candidate's law directly
+($-\partial_\theta F / f$ at the frozen age $\xi$), never from the
+replay: the candidate did not fire in the realized path, so it has no
+replayed time, and using a replayed dual age inside $\partial_\theta F$
+would count $\theta$ twice.
+
+This dependence is worth stating loudly, because Section 6 turns on it:
+\emph{the boundary term is built on top of the pathwise replay}. If the
+replay's time derivatives are wrong, the SPA weight multiplies wrong
+velocities, and no boundary correction can rescue the sum.
+
+\subsection{The validity conditions, collected}
+
+For the single-segment estimator as implemented, the requirements are:
+
+\begin{enumerate}
+\item Each clock keeps one declared law from enabling to firing, so the
+  conditional law given survival is read off that one law (the hazard at
+  the age).
+\item The clock laws are dual-safe: the replay's inverse survival
+  functions differentiate under ForwardDiff.
+\item \code{fire} is pure and states compare by value, so the commuting
+  gate can fire speculatively.
+\item After forcing the pair, each surviving clock's continuation law is
+  its declared law conditioned on its own age --- the world's
+  rekey-then-jitter performs exactly this resample-given-survival at a
+  stopping time.
+\item The functional and laws satisfy the interchange hypotheses
+  (differentiable conditional expectations, uniformly integrable
+  quotients). We do not verify these per model; the finite-difference
+  comparisons in the charter are the operational check.
+\end{enumerate}
+
+%==============================================================================
+\section{The implemented estimator, in the derivation's notation}
+
+For reference, the map between the theory and \code{ClockGradients/src/spa.jl}:
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Theory & Implementation \\
+\midrule
+IPA term & \code{ipa\_gradient} on the replication's own record \\
+hazard $h_e(\xi)$ & \code{pdf(d,\,\char`\~xi)/ccdf(d,\,\char`\~xi)} at the enabling-state law \\
+$d\xi/d\theta$ & rows of \code{ForwardDiff.jacobian(replay\_times)} \\
+$dX_e/d\theta|_\xi$ & $-\,$\code{ForwardDiff.gradient(cdf)}$/f(\xi)$ \\
+positive part $(v)^+$ & \code{max(dxi - dx, 0.0)} \\
+jump $L(\mathrm{PP})-L(\mathrm{DNP})$ & coupled clone pair, shared rekey seed \\
+commuting gate & \code{zero\_jump\_certified} (two speculative \code{fire}s) \\
+horizon family & \code{\_horizon\_jump}, no clones \\
+candidate enumeration & all enabled non-winners (\code{HazardWeight}), \\
+& or next winner with truncated hazard (\code{TruncatedHazard}) \\
+multi-segment refusal & \code{has\_chains(record)} throws \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The refusal in the last row is the subject of the rest of this document.
+Per the design conversation, it stays a whole-record refusal: if any part
+of a record is beyond the estimator's derivation, the user hears a clear
+no rather than a quietly wrong number.
+
+%==============================================================================
+\section{What re-declared clocks change}
+
+\subsection{The vocabulary}
+
+Under processor sharing (and any future discipline that re-evaluates
+laws mid-flight), a clock's declared distribution is replaced at event
+times while the clock stays enabled. Each replacement starts a new
+\emph{segment}. The enabling time $\tau_e$ stays fixed; what changes is
+the declared law, which after a re-declaration says: given the work this
+job has received (the banked age $a$) and the current sharing speed, here
+is the conditional law of the firing age. In Concourse the declared
+object is \code{SharedRemaining(base, bank, speed, shift)}, whose support
+begins at the segment's start.
+
+Write the segment boundaries of one clock as ages
+$0 = a_0 < a_1 < \dots < a_{m}$ past $\tau_e$ (each $a_i$ is some other
+firing's time minus $\tau_e$), with declared laws $G_1, \dots, G_{m+1}$
+on the successive segments. The boundaries are event times of the same
+race we are differentiating, so each $a_i$ depends on $\theta$.
+
+\subsection{What generalizes without new mathematics}
+
+\emph{The weight.} The characterization argument in Section 3.2 never
+used the number of segments. Conditioning on everything except the
+candidate's residual randomness, the candidate's conditional law at the
+decision is its \emph{current} declared law given survival to its current
+age. So the boundary weight for a re-declared candidate is the hazard of
+the latest segment's declared law at the age since $\tau_e$:
+\[
+h_e(\xi) \;=\; \frac{g_{m+1}(\xi)}{1 - G_{m+1}(\xi)} ,
+\]
+with $G_{m+1}$ built at the state of the last re-declaration rather than
+the state of the enabling. In the implementation this means the
+candidate bookkeeping must track the last re-declaration state, a
+mechanical change.
+
+\emph{The clone construction.} By the declaration rule, the re-declared
+laws after a forced firing depend only on the post-firing state and the
+clocks' own histories. If the two orders of the forced pair re-coalesce
+to the same state --- and for a processor-sharing station two completions
+in either order leave the same job set --- then the survivors'
+re-declared laws coincide in both arms, and the commuting gate's
+conclusion (zero jump) still holds. Forcing \emph{always} re-declares
+every survivor under PS, but it re-declares them identically in the two
+arms whenever the states match. The gate survives.
+
+\subsection{Where it actually breaks: the velocity, not the weight}
+
+Section 4.3 said the boundary term is built on the pathwise replay. The
+Question 3 experiments (Section 7) show that the pathwise replay is
+biased on multi-segment records --- under both couplings, in different
+directions, even when every segment declares the same conditional law.
+So the multi-segment problem is not, first, an SPA problem. It is a
+problem in the object SPA stands on.
+
+The cleanest statement of what is missing comes from differentiating the
+carry chain itself. The chain maps a would-be firing age across a
+re-declaration by matching conditional survival: if under the old law
+$G$ the clock would fire at age $\alpha$, and at boundary age $a$ the law
+is replaced by $G^{\mathrm{new}}$, the new would-be age
+$\alpha'$ solves
+\[
+\log S^{\mathrm{new}}(\alpha') \;=\;
+\log S^{\mathrm{new}}(a) + \log S(\alpha) - \log S(a),
+\qquad S = 1 - G .
+\]
+This is exactly the transformation the sampler applies at a re-enable,
+and it is what \code{\_replay\_carry} evaluates. Now differentiate the
+identity with respect to anything --- a component of $\theta$, with the
+boundary age $a = a(\theta)$ moving too. Using
+$\partial_x \log S = -h$ (the hazard) and writing dots for derivatives:
+\[
+\boxed{\;
+\dot{\alpha}'
+\;=\;
+\frac{h^{\mathrm{new}}(a) - h(a)}{h^{\mathrm{new}}(\alpha')}\;\dot{a}
+\;+\;
+\frac{h(\alpha)}{h^{\mathrm{new}}(\alpha')}\;\dot{\alpha}
+\;+\;
+\frac{\partial_\theta \log S(\alpha) - \partial_\theta \log S(a)
+      + \partial_\theta \log S^{\mathrm{new}}(a)
+      - \partial_\theta \log S^{\mathrm{new}}(\alpha')}
+     {h^{\mathrm{new}}(\alpha')}
+\;}
+\]
+Read the first coefficient. The sensitivity of the \emph{boundary time}
+enters the clock's replayed future weighted by the \emph{hazard jump}
+across the re-declaration, $h^{\mathrm{new}}(a) - h(a)$. Three
+consequences, and each one matches an experiment:
+
+\begin{enumerate}
+\item If a re-declaration does not change the conditional law
+  ($h^{\mathrm{new}} \equiv h$ across the boundary), the coefficient is
+  zero and the chain step is transparent: a degenerate multi-segment
+  clock must replay exactly like a single-segment one.
+\item If the re-declaration changes the speed (processor sharing), the
+  coefficient is proportional to the speed change, and the boundary
+  time's derivative $\dot a$ --- the replayed derivative of some other
+  firing --- genuinely feeds the clock's future. Dropping it biases the
+  replay.
+\item The current implementation cannot express the first term. The
+  segment laws are rebuilt from states folded at the \emph{recorded}
+  Float64 times, so \code{bank}, \code{anchor}, and speed are frozen
+  constants with no derivative; and the evaluation of
+  $\log S^{\mathrm{new}}$ at the boundary lands exactly at the new law's
+  support start, where the value is pinned to zero regardless of how the
+  boundary moves. Half of the channel ($h(a)\,\dot a$, through the old
+  law) flows; the other half ($h^{\mathrm{new}}(a)\,\dot a$, through the
+  new law) is killed. The two halves are supposed to cancel exactly in
+  the degenerate case --- killing one of them is why the degenerate
+  experiment shows large per-path errors, not small ones.
+\end{enumerate}
+
+A one-line repair was tried and refuted: taking the formula branch at
+the support boundary changes nothing, because round-off places the
+evaluation on either side of the boundary and the frozen anchors remain
+frozen either way. The repair that the algebra asks for is structural:
+the segment parameters inside the replayed laws must be dual-valued
+functions of the replayed times. Concretely, either the replay folds
+states at dual times (so \code{bank} and \code{anchor} carry
+derivatives), or the record stores each firing's segment boundary
+\emph{indices} (which firing re-declared this clock) so the replay can
+rebuild boundary ages as differences of replayed times --- a
+representation question, and precisely Question 4 of the design brief,
+now with a derivative-driven reason to answer it.
+
+\subsection{The redraw coupling drops the channel entirely}
+
+The same algebra explains the redraw coupling's numbers. Its recurrence
+anchors each firing at the \emph{last} re-declaration:
+$t = \tau_e + \Phi^{-1}(\log u + \Phi(t_{\mathrm{draw}} - \tau_e))$ with
+$\Phi = \log S$ of the last segment's law. The conditioning term
+$\Phi(t_{\mathrm{draw}} - \tau_e)$ evaluates at the last segment's own
+start, where it is pinned to zero, so the derivative of
+$t_{\mathrm{draw}}$ never enters: each firing's sensitivity reduces to
+the last segment's residual only. On the M/M/1--PS experiment this
+truncation shows up as $\partial_\mu \approx -10$ against a true
+$-47.7$: the estimator sees only the tail of each service, not the
+$\theta$-dependence of the whole shared history.
+
+\subsection{The two-job worked example}
+
+The design brief asked for a two-job hand example, and it is worth
+recording because it shows where processor sharing hides its jumps.
+
+Two jobs share one server, no further arrivals, service requirements
+$S_1, S_2$ drawn from $F(\cdot;\theta)$. While both are present each is
+served at speed $\tfrac12$; alone, at speed $1$. The first completion is
+at $2\min(S_1,S_2)$; the second at $\min(S_1,S_2) + \max(S_1,S_2)$ ---
+work conservation: the total busy period is $S_1 + S_2$ regardless of
+order. The occupancy integral is
+\[
+\int_0^\infty N(t)\,dt
+\;=\;
+2 \cdot 2\min + \bigl(\min + \max - 2\min\bigr)
+\;=\;
+3\min(S_1,S_2) + \max(S_1,S_2),
+\]
+a continuous, symmetric, piecewise-smooth function of $(S_1, S_2)$. At
+the near-tie $S_1 = S_2$ the swap exchanges two identical futures: the
+jump $L(\mathrm{PP}) - L(\mathrm{DNP})$ is zero, and the commuting gate
+would prove it (two completions in either order leave the empty
+station). So for occupancy-type functionals of a plain PS station, the
+boundary term contributes nothing at completion--completion ties, and
+the entire derivative must come through the pathwise term --- through
+$\min$ and $\max$ sliding with $\theta$, including the way each
+completion's time depends on the \emph{other} job's completion through
+the speed change. This is exactly the channel Section 6.3 shows the
+replay to be missing. The lesson: for processor sharing the hard part of
+SPA is not the exotic boundary weight; it is that the smooth part must
+first be made correct. Jumps that need the weight arise one level up,
+when the swap changes something downstream that does not re-coalesce ---
+a routing decision, a blocking threshold, a class boundary.
+
+%==============================================================================
+\section{The experiments}
+
+Three experiments, all with fixed seeds, all against common-random-number
+central finite differences (FD) on the same seeds; details in
+\code{notes/event\_loop.tex} and the pinned charter tests.
+
+\subsection{M/M/1--PS, occupancy integral}
+
+$\lambda = 1$, $\mu = 2$, horizon 50, 400 records. Every record carries
+multi-segment chains.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+ & $\partial_\lambda$ & $\partial_\mu$ \\
+\midrule
+FD & $93.4 \pm 3.9$ & $-47.7 \pm 1.8$ \\
+IPA, redraw & $57.7 \pm 3.4$ & $-10.0 \pm 0.1$ \\
+IPA, carry & $206.0 \pm 11.8$ & $-36.2 \pm 1.2$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both couplings biased, in different directions; duals flow with no
+errors; the Float64 replay reproduces the recorded times. Pinned as
+charter item F14.
+
+\subsection{The degenerate-segment experiment}
+
+The design conversation proposed the decisive control: multi-segment
+records whose segments all declare the same conditional law. A
+64-server PS station serves every job at speed 1 at this load
+($\lambda = 3$, $\mu = 1$; a slowdown would need 65 simultaneous jobs),
+so its law is identical to the same station under FCFS --- but the PS
+records carry chains (300 of 300) while the FCFS records are
+segment-free.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+$\partial_\mu$ (true $\approx -143$) & segment-free records & degenerate chains \\
+\midrule
+FD & $-143.1 \pm 1.0$ & (same law) \\
+IPA, redraw & $-142.8 \pm 1.0$ & $-29.5 \pm 0.1$ \\
+IPA, carry & $-142.8 \pm 1.0$ & $-100.4 \pm 0.6$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Identical dynamics, opposite verdicts. The bias lives entirely in the
+record's segment representation, which is what Section 6.3's algebra
+predicts: the degenerate case should be transparent
+($h^{\mathrm{new}} \equiv h$), and it fails only because the
+implementation expresses half of a cancelling pair. Pinned as the
+sharpened F14 test.
+
+\subsection{The refuted one-line repair}
+
+Taking the formula branch at the support boundary of
+\code{SharedRemaining} (strict instead of weak inequality) changed no
+number in either experiment: bit-identical gradients. Diagnosis in
+Section 6.3; kept here because a refuted repair is as informative as a
+successful one, and because it rules out the cheap fix before anyone
+tries it again.
+
+%==============================================================================
+\section{The falsification ladder}
+
+The derivation dictates the order of implementation work, each step
+gated by a test that can refute it.
+
+\begin{enumerate}
+\item \emph{Segment-aware replay.} Give the replay the missing channel:
+  rebuild segment laws with dual boundary parameters (fold at dual
+  times, or record segment boundary indices --- the Question 4
+  decision). Gate: the degenerate-segment test flips from refutation to
+  agreement, path by path --- carry on degenerate chains must equal the
+  segment-free replay exactly, not just on average.
+\item \emph{Pathwise on PS.} Gate: the M/M/1--PS experiment's carry
+  column matches FD; then a Weibull-base PS variant (non-exponential,
+  dual-safe) matches FD, which exercises the $\partial_\theta \log S$
+  terms the exponential case partially hides.
+\item \emph{SPA weight for re-declared candidates.} Implement the
+  latest-segment hazard of Section 6.2, replacing the whole-record
+  refusal only after step 2 holds. Gate: on a functional where PS
+  boundary terms vanish (occupancy), SPA must agree with the repaired
+  IPA; on an order-carried functional (terminal count through a
+  downstream contended resource), SPA must match FD where plain IPA
+  visibly does not.
+\item \emph{Jump construction audit.} The clone pair under PS re-declares
+  survivors in both arms; the commuting gate covers the re-coalescing
+  cases. Gate: an adversarial model where the two orders do \emph{not}
+  re-coalesce (a blocking threshold read between the pair), checked
+  against FD.
+\end{enumerate}
+
+Until step 2 passes, both the SPA refusal and a matching refusal for
+IPA on chained records are the user-facing truth. The design
+conversation settled that refusals are whole-record: a record either is
+within the derivation or is not.
+
+%==============================================================================
+\section{Decisions and open questions}
+
+\begin{itemize}
+\item The hazard weight generalizes to re-declared candidates as the
+  latest declared law's hazard at the age since enabling, built at the
+  last re-declaration state. No new mathematics; bookkeeping only.
+\item The commuting gate survives re-declaration, by the declaration
+  rule, whenever the forced pair re-coalesces.
+\item The genuinely new mathematics is the chain derivative of Section
+  6.3. Its hazard-jump coefficient identifies exactly which sensitivity
+  the current replay cannot represent, predicts the degenerate
+  experiment's failure, and reduces to the classical recurrence when no
+  law changes.
+\item The implementation decision it forces is representational ---
+  Question 4's ``where does segment truth live'' --- and should be taken
+  with this document in hand: the reconstruction keeps the record
+  minimal (the filtration), so the preferred route is to make the
+  reconstruction dual-capable (fold at dual times), and to revisit
+  storing boundaries only if that proves too costly.
+\item Open: the uniform-integrability hypotheses for the multi-segment
+  interchange; whether the truncated-hazard strategy's residual
+  ($\eta$) needs a segment-aware form; and $\theta$-dependent marks,
+  which stay excluded until the mark derivative term is derived.
+\end{itemize}
+
+\end{document}

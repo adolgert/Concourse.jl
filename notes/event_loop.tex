@@ -410,12 +410,28 @@ sorted by key; the dual-θ distribution rebuild is
 \code{SharedRemaining} delegating \code{partype} to its base so the dual
 probe sees θ.
 
-Scope: draw-free models only, refused at factory construction. Branch
-worlds run forward past any record, and a model whose \code{fire} consumes
-auxiliary randomness would need live keyed draw streams with clone/rekey
-semantics of their own — an open design, not an accident. The live model
-binding (\code{live\_model}) gives SPA's twin an off-record \code{fire}
-that fails loudly if a draw is requested.
+Auxiliary draws (the Q1 decision, implemented July 17, 2026): the world
+owns a live \code{KeyedStreams} family beside the sampler, and
+\code{fire} runs from it, so models with marks, probabilistic routing, and
+random selection branch too. The stream key is the stable identity the
+draw belongs to. A mark or source-routing draw is keyed by the source's
+own clock and consumed once per arrival, so the $k$-th value \emph{is} the
+$k$-th arrival of that source in any same-seed world, whatever else fired
+in between --- the ``position in the source's own sequence'' rule. A
+station's routing or selection draw is keyed by the job's clock and stays
+aligned exactly when job identities do. The three obligations are tested:
+a clone copies the generators' states (a coupled clone reproduces firings
+and marks exactly), a rekey re-seeds the auxiliary family with the clock
+family (fresh sizes, not replays), and two same-seed clones agree on the
+marks of corresponding jobs even after a forced firing makes their event
+orders diverge. $\theta$-dependent mark laws stay refused at the factory:
+a mark whose law reads $\theta$ adds its own derivative term to every
+estimator, and that term is future work, not a default. Because marks and
+routing weights are $\theta$-free, their likelihood factors are constants
+in $\theta$ and the score estimator needs no term for them. The live model
+binding (\code{live\_model}) still gives SPA's twin an off-record
+\code{fire} that fails loudly if a draw is requested, because the twin has
+no streams of its own.
 
 CD-1's last estimator threading landed with this work: SPA's commuting
 gates and forced twins fire at the swap time, the horizon jump fires at the
@@ -428,9 +444,11 @@ re-declarations); \code{branching\_gradient} matches finite differences on
 the terminal number-in-system for M/M/1 \emph{and} for PS — the capability
 table's ``needs framework world'' cell, now green for the branching
 estimator; \code{spa\_gradient} matches finite differences on M/M/1
-occupancy. SPA on PS remains refused upstream by its own multi-segment
-guard (the boundary weight for a re-declared candidate is unprototyped),
-and IPA over PS records is untested — the two honest residues.
+occupancy; and \code{branching\_gradient} matches finite differences on
+the bernoulli split (routing draws) and the SITA split (mark draws)
+through the world-owned streams. SPA on PS remains refused upstream by
+its own multi-segment guard, and IPA over PS records is now refuted
+outright (\S\ref{sec:ipa-ps}) — both wait on the Question 2 derivation.
 
 %==============================================================================
 \section{Charter extensions}
@@ -460,6 +478,87 @@ Continuing the numbering of \code{model\_definition.tex}~\S7:
   estimator is valid when clocks are re-declared mid-flight.
   \emph{Test:} \code{branching\_gradient} vs.\ common-random-number finite
   differences on the PS terminal count, within 4 combined SEs.
+\item[F14 (pathwise estimation over re-declared clocks).] \emph{Refuted;
+  see \S\ref{sec:ipa-ps}.} The claim was: the frozen-order IPA replay,
+  which was written with multi-segment records in mind, gives the correct
+  derivative on processor-sharing records. The experiment says no, under
+  both couplings. \emph{Test:} the refutation is pinned in
+  \code{test\_ps.jl} with fixed seeds, alongside the mechanical facts that
+  survived (duals flow through \code{SharedRemaining}; the replay
+  reproduces the recorded times at the sampling parameter).
 \end{description}
 
-\end{document}
+%------------------------------------------------------------------------------
+\section{The Question 3 experiment: IPA over processor-sharing records}
+\label{sec:ipa-ps}
+
+The design brief asked whether IPA, run over a processor-sharing record,
+matches finite differences. The experiment (M/M/1--PS, $\lambda = 1$,
+$\mu = 2$, horizon 50, 400 records, common-random-number central
+differences on the same seeds, functional $\int_0^H N\,dt$) answers no:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+ & $\partial_\lambda$ & $\partial_\mu$ \\
+\midrule
+finite differences & $93.4 \pm 3.9$ & $-47.7 \pm 1.8$ \\
+IPA, redraw coupling & $57.7 \pm 3.4$ & $-10.0 \pm 0.1$ \\
+IPA, carry coupling & $206.0 \pm 11.8$ & $-36.2 \pm 1.2$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+(The steady-state truths are $+100$ and $-50$ times the horizon fraction
+at stationarity; the finite differences sit where the transient predicts.)
+Three facts sharpen the failure into something usable.
+
+First, the duals flow without errors. \code{SharedRemaining} was admitted
+to the dual-safe gate by the recursive rule (a wrapper is dual-safe when
+its base law is), no exceptions surfaced, and the Float64 replay
+reproduces the recorded firing times. The failure is a wrong number, not
+a crash.
+
+Second, the bias is attributable to the record's representation of
+segments, not to the dynamics. The sharpest evidence is a degenerate
+experiment: a processor-sharing station with 64 servers re-declares every
+survivor at every count change, yet the speed is always 1, so the
+dynamics are exactly those of the same station under FCFS --- but the PS
+run's records carry multi-segment chains while the FCFS run's records are
+segment-free. On the segment-free records both couplings match finite
+differences. On the multi-segment records of the \emph{same law} both are
+badly biased (redraw $\partial_\mu$: $-29.5$ vs the true $-143$; carry
+$\partial_\lambda$: $233$ vs the true $49$), and the per-path carry
+gradients differ from their segment-free twins by up to several hundred.
+Identical dynamics, opposite verdicts: the segment representation is the
+whole story.
+
+Third, the mechanism is located, and it is structural rather than a
+one-line defect. The replay recurrences rebuild each segment's law from
+states folded at the \emph{recorded} Float64 times, so the law's
+\code{bank}, \code{anchor}, and speed are frozen constants; and the
+conditional-survival term that re-anchors a re-declared clock is
+evaluated exactly at the segment's start, where the declared law's
+support begins and the term is pinned to zero whatever the boundary
+time's derivative is. Both facts say the same thing: the derivative of a
+re-declaration \emph{boundary time} --- itself a $\theta$-dependent event
+time of the race being differentiated --- has no channel into the
+replayed times. (A candidate one-line repair, taking the formula branch
+at the support boundary, was tried and changed nothing: round-off places
+the evaluation on either side of the boundary, and the frozen anchors
+remain either way.) A complete repair needs the segment parameters to be
+dual-valued functions of the replayed times, which is Question 4's
+territory --- either the reconstruction learns to fold at dual times, or
+the record carries the segment boundaries in a differentiable form. What
+the correct derivative even is, once that channel exists, is Question 2's
+derivation.
+
+Consequence for users today: on processor-sharing records the valid
+estimators are the score function and branching (both tested against
+finite differences); IPA silently returns a confident wrong number, which
+is the failure mode the score pairing exists to detect. The refusal
+question --- whether the IPA entry point should reject multi-segment
+records the way SPA already does --- belongs to the Question 2 derivation,
+because the derivation will say which multi-segment records are safe
+rather than banning them all.

@@ -43,6 +43,11 @@ ClockGradients.fire_changes(rm::ReplayModel, st::QueueState, key::ClockKey, t) =
 ClockGradients.states_equal(rm::ReplayModel, a::QueueState, b::QueueState) =
     states_equal(a, b)
 
+# SharedRemaining's invlogccdf delegates to the base law's invlogccdf plus
+# arithmetic, so pathwise duals flow through it exactly when they flow
+# through the base law (ClockGradients' documented extension point).
+ClockGradients._dual_safe(d::SharedRemaining) = ClockGradients._dual_safe(d.base)
+
 # The framework-record ingestion seam: the bare-trace constructor rebuilds
 # back-references and retained uniforms by walking this very contract.
 ClockGradients.gradient_record(rm::ReplayModel, rec::MarkedRecord,

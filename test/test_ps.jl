@@ -111,6 +111,100 @@ wanted("f8 resident-count changes emit reenable deltas for every survivor") &&
     @test saw > 10
 end
 
+# F14 (refuted; event_loop.tex §"The Question 3 experiment"): frozen-order
+# IPA over PS records is BIASED under both couplings, while the mechanical
+# layer is sound — duals flow through SharedRemaining and the Float64 replay
+# reproduces the recorded times. Fixed seeds make the margins deterministic.
+wanted("f14 ipa is biased over ps records under both couplings") &&
+@testset "f14 ipa is biased over ps records under both couplings" begin
+    m = mm1_ps()
+    θ = [1.0, 2.0]
+    H = 50.0
+    R = 200
+    fn = ClockGradients.IntegratedOccupancy(number_in_system)
+    G = Dict(:redraw => zeros(2, R), :carry => zeros(2, R))
+    for r in 1:R
+        rec = simulate(m, θ, H; seed = 700 + r)
+        rm = replay_model(m, rec)
+        for c in (:redraw, :carry)
+            grec = ClockGradients.GradientRecord(rm, θ, rec.key, rec.time,
+                                                 rec.horizon; coupling = c)
+            # The mechanical claim that SURVIVED: replay reproduces the record.
+            @test ClockGradients.replay_times(rm, θ, grec) ≈ rec.time atol = 1e-8
+            G[c][:, r] = ClockGradients.ipa_gradient(rm, θ, grec, fn)
+        end
+    end
+    intN(rec) = rec.horizon * time_average(number_in_system, m, rec)
+    δ = 0.05
+    for (c, j, factor) in ((:redraw, 2, 2.0), (:carry, 1, 1.0))
+        θp = copy(θ); θp[j] += δ
+        θm2 = copy(θ); θm2[j] -= δ
+        diffs = [(intN(simulate(m, θp, H; seed = 700 + r)) -
+                  intN(simulate(m, θm2, H; seed = 700 + r))) / (2δ) for r in 1:R]
+        fdest, fdse = mean(diffs), std(diffs) / sqrt(R)
+        est = mean(G[c][j, :]); se = std(G[c][j, :]) / sqrt(R)
+        # The refutation: the gap EXCEEDS the 4-combined-SE tolerance by the
+        # stated factor (redraw ∂μ by 2x; carry ∂λ by 1x).
+        @test abs(est - fdest) > factor * 4 * sqrt(se^2 + fdse^2)
+    end
+end
+
+# F14 sharpened (the degenerate-segment experiment of the design
+# conversation): a 64-server PS station always shares at speed 1 at this
+# load (a slowdown needs 65 simultaneous jobs), so its LAW equals the same
+# station under FCFS — but its records carry multi-segment chains while the
+# FCFS records are segment-free. Both couplings are unbiased on the
+# segment-free records and biased on the multi-segment ones: the bias is
+# attributable to the segment representation, not the dynamics.
+wanted("f14 identical dynamics: segment-free twin is unbiased, segmented is not") &&
+@testset "f14 identical dynamics: segment-free twin is unbiased, segmented is not" begin
+    function many_server(disc)
+        net = QueueNetwork(param_names = (:lambda, :mu))
+        source!(net, :arrive; interarrival = Law(:Exponential, scale = inv(Param(:lambda))))
+        station!(net, :cpu; discipline = disc, servers = 64,
+                 service = Law(:Exponential, scale = inv(Param(:mu))))
+        sink!(net, :done)
+        route!(net, :arrive, Always(:cpu)); route!(net, :cpu, Always(:done))
+        compile(net)
+    end
+    mps = many_server(ProcessorSharing())
+    mfc = many_server(FCFS())
+    θ = [3.0, 1.0]
+    H = 50.0
+    R = 150
+    fn = ClockGradients.IntegratedOccupancy(number_in_system)
+    G = Dict((c, tag) => zeros(R) for c in (:redraw, :carry), tag in (:ps, :fc))
+    nmulti = 0
+    for r in 1:R
+        for (m, tag) in ((mps, :ps), (mfc, :fc))
+            rec = simulate(m, θ, H; seed = 900 + r)
+            rm = replay_model(m, rec)
+            for c in (:redraw, :carry)
+                grec = ClockGradients.GradientRecord(rm, θ, rec.key, rec.time,
+                                                     rec.horizon; coupling = c)
+                tag == :ps && c == :carry &&
+                    (nmulti += any(grec.seg_offset[k+1] - grec.seg_offset[k] > 1
+                                   for k in 1:length(rec.key)))
+                G[(c, tag)][r] = ClockGradients.ipa_gradient(rm, θ, grec, fn)[2]
+            end
+        end
+    end
+    @test nmulti == R                        # every PS record is genuinely chained
+    intN(rec) = rec.horizon * time_average(number_in_system, mfc, rec)
+    δ = 0.05
+    θp = copy(θ); θp[2] += δ
+    θm2 = copy(θ); θm2[2] -= δ
+    diffs = [(intN(simulate(mfc, θp, H; seed = 900 + r)) -
+              intN(simulate(mfc, θm2, H; seed = 900 + r))) / (2δ) for r in 1:R]
+    fdest, fdse = mean(diffs), std(diffs) / sqrt(R)
+    for c in (:redraw, :carry)
+        est = mean(G[(c, :fc)]); se = std(G[(c, :fc)]) / sqrt(R)
+        @test abs(est - fdest) <= 4 * sqrt(se^2 + fdse^2)    # segment-free: unbiased
+        est = mean(G[(c, :ps)]); se = std(G[(c, :ps)]) / sqrt(R)
+        @test abs(est - fdest) > 4 * sqrt(se^2 + fdse^2)     # segmented: biased
+    end
+end
+
 wanted("f8 score gradient matches finite differences under ps segments") &&
 @testset "f8 score gradient matches finite differences under ps segments" begin
     m = mm1_ps()

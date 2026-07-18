@@ -4,29 +4,40 @@
 # world is the second implementation of the protocol beside the ChronoSim
 # extension — same test of the abstraction as the model contract.
 #
-# Scope: draw-free models only. Branch worlds run FORWARD past any record, so
-# a model whose fire consumes auxiliary randomness (marks, probabilistic
-# routing, SIRO) would need live keyed draw streams with clone/rekey
-# semantics of their own — a design not yet written. The factory refuses such
-# models up front rather than failing mid-estimate.
+# Auxiliary draws (marks, probabilistic routing, SIRO): the world owns live
+# keyed streams beside the sampler — the Q1 decision. The stream key is the
+# stable identity the draw belongs to, never a position in a global call
+# sequence: a mark or source-routing draw is keyed by the source's own clock
+# and consumed once per arrival, so the k-th value IS the k-th arrival of
+# that source in any same-seed world, whatever else fired in between. A
+# station's routing or SIRO draw is keyed by the job's clock and stays
+# aligned exactly when job identities do. Clone copies the streams with
+# their generator states; rekey re-seeds them with the clock streams. No
+# jitter analogue exists because auxiliary draws are consumed at firings,
+# never scheduled ahead.
+#
+# θ-dependent MARK laws stay refused: the mark's own derivative would add a
+# term to every estimator (design brief Q1's separable sub-question).
+# Routing weights and SIRO selection are θ-free by construction.
 
 mutable struct ConcourseWorld{C}
     m::QueueGSMP
     θ::Vector{Float64}
     state::QueueState
     ctx::C
+    streams::CompetingClocks.KeyedStreams{StreamKey}
     time::Float64
 end
 
-function _assert_draw_free(m::QueueGSMP)
+function _assert_thetafree_marks(m::QueueGSMP)
     for stn in m.stations
-        stn.mark === nothing || throw(ArgumentError(
-            "branchable worlds need draw-free models; source $(stn.name) draws marks"))
-        stn.routing !== nothing && stn.routing.kind == :probabilistic &&
-            throw(ArgumentError(
-                "branchable worlds need draw-free models; $(stn.name) routes probabilistically"))
-        stn.discipline.select == :random && throw(ArgumentError(
-            "branchable worlds need draw-free models; $(stn.name) selects at random"))
+        stn.mark === nothing && continue
+        for (name, law) in stn.mark.laws
+            ps = reads_params(law)
+            isempty(ps) || throw(ArgumentError(
+                "branchable worlds support θ-free marks only for now; mark " *
+                "$name of $(stn.name) reads parameters $(sort!(collect(ps)))"))
+        end
     end
     nothing
 end
@@ -41,13 +52,17 @@ peek-repeatability obligation requires; a redraw-at-next method would fail
 """
 function branch_world(m::QueueGSMP, θ::AbstractVector; seed::Integer,
                       method=NextReactionMethod())
-    _assert_draw_free(m)
-    ctx = SamplingContext(SamplerBuilder(ClockKey, Float64; method), Xoshiro(seed))
+    _assert_thetafree_marks(m)
+    rng = Xoshiro(seed)
+    ctx = SamplingContext(SamplerBuilder(ClockKey, Float64; method), rng)
+    # The interpreter's own seeding order: the auxiliary family's seed is the
+    # next UInt64 off the master rng, after the context has taken its share.
+    streams = CompetingClocks.KeyedStreams{StreamKey}(rand(rng, UInt64))
     st = initial_state(m)
     for k in enabled(m, st)
         enable!(ctx, k, clock_distribution(m, θ, k, st), st.te[k])
     end
-    ConcourseWorld(m, collect(Float64, θ), st, ctx, 0.0)
+    ConcourseWorld(m, collect(Float64, θ), st, ctx, streams, 0.0)
 end
 
 function ClockGradients.branch_peek(w::ConcourseWorld)
@@ -59,7 +74,7 @@ end
 # Commit and force share one update path — the resulting world depends on
 # which transition ran, not on why it ran (the protocol's force obligation).
 function _world_apply!(w::ConcourseWorld, key::ClockKey, t::Float64)
-    ds = replaydraws(key, DrawList(), w.m.params)
+    ds = livedraws(w.streams, key, w.m.params, w.θ)
     st, deltas = fire_changes(w.m, w.state, key, t, ds)
     apply_deltas!(w.ctx, w.m, w.θ, st, deltas, t)
     w.state = st
@@ -85,7 +100,9 @@ function ClockGradients.branch_clone(w::ConcourseWorld)
     ctx2 = CompetingClocks.clone(w.ctx, copy(w.ctx.rng))
     CompetingClocks.copy_clocks!(ctx2, w.ctx)
     ctx2.time = w.ctx.time
-    ConcourseWorld(w.m, w.θ, copystate(w.state), ctx2, w.time)
+    # copy carries the auxiliary generators' STATES, so the clone's next mark
+    # or routing draw equals the original's (the Q1 copying obligation).
+    ConcourseWorld(w.m, w.θ, copystate(w.state), ctx2, copy(w.streams), w.time)
 end
 
 # Rekey-then-jitter, the same pairing the ChronoSim adapter uses: reseeding
@@ -95,6 +112,11 @@ end
 function ClockGradients.branch_rekey!(w::ConcourseWorld, seed)
     CompetingClocks.rekey_streams!(w.ctx.sampler, UInt64(seed))
     CompetingClocks.jitter!(w.ctx.sampler, w.time)
+    # Re-seed the auxiliary family too (the Q1 re-seeding obligation): clock
+    # streams alone would leave the clone replaying the original's future
+    # sizes and coin flips. Same-seed clones share both families, which is
+    # what keeps corresponding jobs' draws matched across them.
+    CompetingClocks.rekey_streams!(w.streams, UInt64(seed))
     w
 end
 
