@@ -12,13 +12,22 @@ disagree; the code discharges the falsification charters in those notes'
 module Concourse
 
 using Distributions
-import Random
+using Random: Random
 using Random: Xoshiro, randexp
-import ClockGradients
-import CompetingClocks
-using CompetingClocks: SamplingContext, SamplerBuilder,
-    enable!, disable!, reenable!, fire!, next,
-    NextReactionMethod, FirstToFireMethod, FirstReactionMethod, DirectMethod
+using ClockGradients: ClockGradients
+using CompetingClocks: CompetingClocks
+using CompetingClocks:
+    SamplingContext,
+    SamplerBuilder,
+    enable!,
+    disable!,
+    reenable!,
+    fire!,
+    next,
+    NextReactionMethod,
+    FirstToFireMethod,
+    FirstReactionMethod,
+    DirectMethod
 
 include("expr.jl")
 include("network.jl")
@@ -31,8 +40,8 @@ include("gradients.jl")
 include("branchworld.jl")
 
 # The combinator algebra (A3)
-export ScalarExpr, Param, Mark, Enab, Const, Law, Opaque, MarkLaw
-export reads_params, reads_marks, reads_time
+export ScalarExpr, Param, Mark, Enab, Const, InService, InBuffer, Law, Opaque, MarkLaw
+export reads_params, reads_marks, reads_time, reads_state
 # The surface language
 export QueueNetwork, source!, station!, sink!, fork!, join!, route!, compile
 export FCFS, LCFS, SIRO, Priority, ProcessorSharing, SRPT

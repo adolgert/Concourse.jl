@@ -53,6 +53,14 @@ implemented. The
 [branching manual page](https://computingkitchen.com/Concourse.jl/dev/manual/branching/)
 covers what is and is not admitted.
 
+State-dependent service laws (`InService`/`InBuffer`) are refused under
+branching worlds for the same kind of reason: pathwise IPA is not
+guaranteed unbiased for them, because reordering events changes an
+occupancy — and with it the law itself — discontinuously. The score
+estimator remains valid on their records. The
+[state-dependent service laws page](https://computingkitchen.com/Concourse.jl/dev/manual/state_dependent/)
+explains the segment convention and keeps the estimator-validity table.
+
 ## Documentation
 
 The [documentation](https://computingkitchen.com/Concourse.jl/dev/) has a

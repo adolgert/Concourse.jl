@@ -65,7 +65,7 @@ station!(net, :cpu;
 ```
 """
 function Priority(by::ScalarExpr; preempt::Bool=false, memory::Symbol=:resume)
-    Discipline(:priority, :ordered, by, :front, preempt, memory)
+    return Discipline(:priority, :ordered, by, :front, preempt, memory)
 end
 
 # Shortest remaining processing time: the ordering key is size MINUS the
@@ -152,8 +152,9 @@ struct Probabilistic <: Kernel
     dests::Vector{Symbol}
     probs::Vector{Float64}
 end
-Probabilistic(pairs::Pair{Symbol,<:Real}...) =
-    Probabilistic(Symbol[p.first for p in pairs], Float64[p.second for p in pairs])
+function Probabilistic(pairs::Pair{Symbol,<:Real}...)
+    return Probabilistic(Symbol[p.first for p in pairs], Float64[p.second for p in pairs])
+end
 
 """
     RoundRobin(dests::Vector{Symbol})
@@ -224,14 +225,15 @@ mutable struct QueueNetwork
     stations::Vector{SurfaceStation}
     routes::Dict{Symbol,Kernel}
 end
-QueueNetwork(; param_names) = QueueNetwork(collect(Symbol, param_names),
-                                           SurfaceStation[], Dict{Symbol,Kernel}())
+function QueueNetwork(; param_names)
+    return QueueNetwork(collect(Symbol, param_names), SurfaceStation[], Dict{Symbol,Kernel}())
+end
 
 function _addstation!(net::QueueNetwork, s::SurfaceStation)
     any(x -> x.name == s.name, net.stations) &&
         throw(ArgumentError("duplicate station name $(s.name)"))
     push!(net.stations, s)
-    s
+    return s
 end
 
 """
@@ -248,11 +250,27 @@ Add an arrival stream called `name` to the network.
 
 A source needs a [`route!`](@ref) saying where its arrivals go.
 """
-function source!(net::QueueNetwork, name::Symbol;
-                 interarrival::AbstractLaw, mark::Union{MarkLaw,Nothing}=nothing)
-    _addstation!(net, SurfaceStation(name, :source, FCFS(), 0, 0, :drop,
-                                     FCFSUnblock(), interarrival, mark,
-                                     nothing, nothing, Symbol[], 0))
+function source!(
+    net::QueueNetwork, name::Symbol; interarrival::AbstractLaw, mark::Union{MarkLaw,Nothing}=nothing
+)
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :source,
+            FCFS(),
+            0,
+            0,
+            :drop,
+            FCFSUnblock(),
+            interarrival,
+            mark,
+            nothing,
+            nothing,
+            Symbol[],
+            0,
+        ),
+    )
 end
 
 """
@@ -263,7 +281,12 @@ end
 Add a service station called `name` to the network.
 
 - `service`: the service-time law, required. It may read parameters, the
-  job's marks, and the enabling time.
+  job's marks, and the enabling time. Alone among laws it may also read
+  live station occupancy through [`InService`](@ref)/[`InBuffer`](@ref)
+  (check C5); such a law is re-evaluated whenever a watched count changes,
+  with the job's accrued service effort carried over and `te` kept at the
+  original enabling — the same segment convention
+  [`ProcessorSharing`](@ref) uses.
 - `discipline`: how the waiting line is kept and served — [`FCFS`](@ref)
   (the default), [`LCFS`](@ref), [`SIRO`](@ref), [`Priority`](@ref),
   [`ProcessorSharing`](@ref), or [`SRPT`](@ref).
@@ -285,17 +308,38 @@ Add a service station called `name` to the network.
 
 A station needs a [`route!`](@ref) saying where finished jobs go.
 """
-function station!(net::QueueNetwork, name::Symbol;
-                  discipline::Discipline=FCFS(), servers::Int=1,
-                  service::AbstractLaw, capacity::Int=typemax(Int),
-                  overflow::Symbol=:drop, unblock::UnblockPolicy=FCFSUnblock(),
-                  patience::Union{AbstractLaw,Nothing}=nothing,
-                  renege_to::Union{Symbol,Nothing}=nothing)
+function station!(
+    net::QueueNetwork,
+    name::Symbol;
+    discipline::Discipline=FCFS(),
+    servers::Int=1,
+    service::AbstractLaw,
+    capacity::Int=typemax(Int),
+    overflow::Symbol=:drop,
+    unblock::UnblockPolicy=FCFSUnblock(),
+    patience::Union{AbstractLaw,Nothing}=nothing,
+    renege_to::Union{Symbol,Nothing}=nothing,
+)
     (patience === nothing) == (renege_to === nothing) ||
         throw(ArgumentError("patience and renege_to come together"))
-    _addstation!(net, SurfaceStation(name, :station, discipline, servers,
-                                     capacity, overflow, unblock, service,
-                                     nothing, patience, renege_to, Symbol[], 0))
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :station,
+            discipline,
+            servers,
+            capacity,
+            overflow,
+            unblock,
+            service,
+            nothing,
+            patience,
+            renege_to,
+            Symbol[],
+            0,
+        ),
+    )
 end
 
 """
@@ -306,9 +350,24 @@ leaves the system and is deleted from the state; its history stays visible
 in the record. A sink cannot have a [`route!`](@ref).
 """
 function sink!(net::QueueNetwork, name::Symbol)
-    _addstation!(net, SurfaceStation(name, :sink, FCFS(), 0, 0, :drop,
-                                     FCFSUnblock(), nothing, nothing,
-                                     nothing, nothing, Symbol[], 0))
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :sink,
+            FCFS(),
+            0,
+            0,
+            :drop,
+            FCFSUnblock(),
+            nothing,
+            nothing,
+            nothing,
+            nothing,
+            Symbol[],
+            0,
+        ),
+    )
 end
 
 # A fork is clock-free: depositing a job splits it into one sibling per
@@ -327,9 +386,24 @@ branches, so it cannot have a [`route!`](@ref). Pair it with a
 """
 function fork!(net::QueueNetwork, name::Symbol; branches)
     length(branches) >= 2 || throw(ArgumentError("a fork needs at least two branches"))
-    _addstation!(net, SurfaceStation(name, :fork, FCFS(), 0, 0, :drop,
-                                     FCFSUnblock(), nothing, nothing, nothing,
-                                     nothing, collect(Symbol, branches), 0))
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :fork,
+            FCFS(),
+            0,
+            0,
+            :drop,
+            FCFSUnblock(),
+            nothing,
+            nothing,
+            nothing,
+            nothing,
+            collect(Symbol, branches),
+            0,
+        ),
+    )
 end
 
 """
@@ -344,9 +418,24 @@ still count as jobs in the system.
 """
 function join!(net::QueueNetwork, name::Symbol; parts::Int)
     parts >= 2 || throw(ArgumentError("a join needs at least two parts"))
-    _addstation!(net, SurfaceStation(name, :join, FCFS(), 0, 0, :drop,
-                                     FCFSUnblock(), nothing, nothing, nothing,
-                                     nothing, Symbol[], parts))
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :join,
+            FCFS(),
+            0,
+            0,
+            :drop,
+            FCFSUnblock(),
+            nothing,
+            nothing,
+            nothing,
+            nothing,
+            Symbol[],
+            parts,
+        ),
+    )
 end
 
 """
@@ -359,7 +448,7 @@ route; sinks and forks take none. [`compile`](@ref) checks this.
 """
 function route!(net::QueueNetwork, origin::Symbol, kernel::Kernel)
     net.routes[origin] = kernel
-    net
+    return net
 end
 
 # ---------------------------------------------------------------------------
@@ -400,31 +489,41 @@ plain data. Produced by [`compile`](@ref); consumed by the interpreter
 estimators. Station references are integer indices. `names` maps a station
 name to its index, and `params` maps a parameter name to its position in
 the parameter vector `θ`.
+
+`srv_readers` and `buf_readers` are the state-dependence map: `srv_readers[s]`
+lists the stations whose service law reads [`InService`](@ref) of station
+`s` (a [`ProcessorSharing`](@ref) station is an srv-reader of itself, since
+every resident's speed reads the resident count), and `buf_readers[s]`
+likewise for [`InBuffer`](@ref). [`fire_changes`](@ref) re-evaluates a
+reader's surviving service clocks whenever a watched count changes.
 """
 struct QueueGSMP
     stations::Vector{CompiledStation}
     names::Dict{Symbol,Int}
     params::Dict{Symbol,Int}
+    srv_readers::Vector{Vector{Int}}
+    buf_readers::Vector{Vector{Int}}
 end
 
 function _compilekernel(k::Always, names)
-    CompiledKernel(:always, Int32[names[k.dest]], nothing, Float64[], Float64[])
+    return CompiledKernel(:always, Int32[names[k.dest]], nothing, Float64[], Float64[])
 end
 function _compilekernel(k::ByMark, names)
     length(k.dests) == length(k.cutoffs) + 1 ||
         throw(ArgumentError("ByMark needs one more destination than cutoffs"))
-    CompiledKernel(:bymark, Int32[names[d] for d in k.dests], k.expr,
-                   k.cutoffs, Float64[])
+    return CompiledKernel(:bymark, Int32[names[d] for d in k.dests], k.expr, k.cutoffs, Float64[])
 end
 function _compilekernel(k::Probabilistic, names)
     isapprox(sum(k.probs), 1.0; atol=1e-9) ||
         throw(ArgumentError("Probabilistic routing probabilities must sum to 1"))
-    CompiledKernel(:probabilistic, Int32[names[d] for d in k.dests], nothing,
-                   Float64[], k.probs)
+    return CompiledKernel(
+        :probabilistic, Int32[names[d] for d in k.dests], nothing, Float64[], k.probs
+    )
 end
 function _compilekernel(k::RoundRobin, names)
-    CompiledKernel(:roundrobin, Int32[names[d] for d in k.dests], nothing,
-                   Float64[], Float64[])
+    return CompiledKernel(
+        :roundrobin, Int32[names[d] for d in k.dests], nothing, Float64[], Float64[]
+    )
 end
 
 """
@@ -442,7 +541,10 @@ first violation:
 - deterministic kernels ([`ByMark`](@ref)) read marks only;
 - every law reads only declared parameters and marks some source produces;
 - no cycle of finite `:block` buffers exists, because a full cycle would
-  deadlock.
+  deadlock;
+- station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is read only by
+  the service law of a station, and every occupancy read names a declared
+  station (check C5).
 """
 function compile(net::QueueNetwork)
     names = Dict{Symbol,Int}(s.name => i for (i, s) in enumerate(net.stations))
@@ -450,17 +552,52 @@ function compile(net::QueueNetwork)
     check_network(net, names, params)
     stations = CompiledStation[]
     for s in net.stations
-        routing = s.kind in (:sink, :fork) ? nothing :
-                  _compilekernel(net.routes[s.name], names)
+        routing = s.kind in (:sink, :fork) ? nothing : _compilekernel(net.routes[s.name], names)
         renege = s.renege_to === nothing ? Int32(0) : Int32(names[s.renege_to])
-        push!(stations, CompiledStation(s.name, s.kind, s.discipline, s.servers,
-                                        s.capacity, s.overflow, s.unblock,
-                                        s.service, routing, s.mark,
-                                        s.patience, renege,
-                                        Int32[names[b] for b in s.branches],
-                                        s.parts))
+        push!(
+            stations,
+            CompiledStation(
+                s.name,
+                s.kind,
+                s.discipline,
+                s.servers,
+                s.capacity,
+                s.overflow,
+                s.unblock,
+                s.service,
+                routing,
+                s.mark,
+                s.patience,
+                renege,
+                Int32[names[b] for b in s.branches],
+                s.parts,
+            ),
+        )
     end
-    QueueGSMP(stations, names, params)
+    # The state-dependence map: which stations' service laws watch each
+    # station's counts. Processor sharing is the built-in state-dependent
+    # law (speed min(1, servers/n) reads the own resident count), so a PS
+    # station registers as an srv-reader of itself and its re-evaluations
+    # ride the same general trigger as InService/InBuffer readers.
+    n = length(stations)
+    srv_readers = [Int[] for _ in 1:n]
+    buf_readers = [Int[] for _ in 1:n]
+    for (r, stn) in enumerate(stations)
+        stn.kind == :station || continue
+        svc = stn.service
+        if svc !== nothing
+            for w in _reads_srv(svc)
+                push!(srv_readers[names[w]], r)
+            end
+            for w in _reads_buf(svc)
+                push!(buf_readers[names[w]], r)
+            end
+        end
+        stn.discipline.name == :ps && push!(srv_readers[r], r)
+    end
+    foreach(v -> unique!(sort!(v)), srv_readers)
+    foreach(v -> unique!(sort!(v)), buf_readers)
+    return QueueGSMP(stations, names, params, srv_readers, buf_readers)
 end
 
 # Check C1 (structure) and the parts of C2 (mark dataflow) and the randomness
@@ -477,16 +614,14 @@ function check_network(net::QueueNetwork, names, params)
                     throw(ArgumentError("fork $(s.name) branches to unknown station $b"))
             end
         elseif s.kind != :sink
-            haskey(net.routes, s.name) ||
-                throw(ArgumentError("station $(s.name) has no route!"))
+            haskey(net.routes, s.name) || throw(ArgumentError("station $(s.name) has no route!"))
             k = net.routes[s.name]
             for d in _kerneldests(k)
                 haskey(names, d) ||
                     throw(ArgumentError("route from $(s.name) targets unknown station $d"))
             end
         else
-            haskey(net.routes, s.name) &&
-                throw(ArgumentError("sink $(s.name) cannot have a route"))
+            haskey(net.routes, s.name) && throw(ArgumentError("sink $(s.name) cannot have a route"))
         end
         s.mark !== nothing && union!(produced_marks, marknames(s.mark))
     end
@@ -496,10 +631,18 @@ function check_network(net::QueueNetwork, names, params)
         k isa ByMark || continue
         isempty(reads_params(k.expr)) && !reads_time(k.expr) ||
             throw(ArgumentError("routing kernel at $origin may read only marks"))
+        isempty(reads_state(k.expr)) || throw(
+            ArgumentError(
+                "routing kernel at $origin reads station state; A4 reserves " *
+                "likelihood-bearing decisions for recorded draws (check C5)",
+            ),
+        )
     end
     check_blocking_acyclic(net)
+    check_state_reads(net, names)
     for s in net.stations
-        s.renege_to === nothing || haskey(names, s.renege_to) ||
+        s.renege_to === nothing ||
+            haskey(names, s.renege_to) ||
             throw(ArgumentError("renege_to at $(s.name) targets unknown station $(s.renege_to)"))
         laws = AbstractLaw[]
         s.service === nothing || push!(laws, s.service)
@@ -517,7 +660,73 @@ function check_network(net::QueueNetwork, names, params)
             end
         end
     end
-    nothing
+    return nothing
+end
+
+# Check C5: only the service law of a station may read station occupancy
+# (InService/InBuffer). State in a mark law would enter the record's mark
+# draws; state in an arrival, patience, routing, or ordering expression
+# would either change the likelihood outside recorded draws (A4) or is a
+# feature of its own. Every occupancy read must name a declared station —
+# sources, sinks, forks, and joins hold no jobs to count.
+function check_state_reads(net::QueueNetwork, names)
+    kindof = Dict(s.name => s.kind for s in net.stations)
+    for s in net.stations
+        if s.mark !== nothing
+            for (mk, law) in s.mark.laws
+                isempty(reads_state(law)) || throw(
+                    ArgumentError(
+                        "mark law $mk at $(s.name) reads station state; state in a " *
+                        "mark law would put station state into the record's mark " *
+                        "draws, breaking replay — amendment A4 (check C5)",
+                    ),
+                )
+            end
+        end
+        if s.kind == :source && s.service !== nothing
+            isempty(reads_state(s.service)) || throw(
+                ArgumentError(
+                    "interarrival law at $(s.name) reads station state; " *
+                    "state-dependent arrivals/balking is a separate feature, " *
+                    "not supported (check C5)",
+                ),
+            )
+        end
+        if s.patience !== nothing
+            isempty(reads_state(s.patience)) || throw(
+                ArgumentError(
+                    "patience law at $(s.name) reads station state; only the " *
+                    "service law of a station may read occupancy (check C5)",
+                ),
+            )
+        end
+        if s.discipline.by !== nothing
+            isempty(reads_state(s.discipline.by)) || throw(
+                ArgumentError(
+                    "discipline ordering key at $(s.name) reads station state; only " *
+                    "the service law of a station may read occupancy (check C5)",
+                ),
+            )
+        end
+        if s.kind == :station && s.service !== nothing
+            for w in reads_state(s.service)
+                haskey(names, w) || throw(
+                    ArgumentError(
+                        "service law at $(s.name) reads occupancy of unknown " *
+                        "station $w (check C5)",
+                    ),
+                )
+                kindof[w] == :station || throw(
+                    ArgumentError(
+                        "service law at $(s.name) reads occupancy of $w, which is " *
+                        "a $(kindof[w]), not a station — only stations have " *
+                        "in-service and buffer counts (check C5)",
+                    ),
+                )
+            end
+        end
+    end
+    return nothing
 end
 
 _kerneldests(k::Always) = (k.dest,)
@@ -530,8 +739,7 @@ _kerneldests(k::RoundRobin) = Tuple(k.dests)
 # precondition under which the settle cascade's termination argument (F6)
 # holds — so it is an error, not a warning.
 function check_blocking_acyclic(net::QueueNetwork)
-    canblock(s) = s.kind == :station && s.overflow == :block &&
-                  s.capacity != typemax(Int)
+    canblock(s) = s.kind == :station && s.overflow == :block && s.capacity != typemax(Int)
     byname = Dict(s.name => s for s in net.stations)
     edges = Dict{Symbol,Vector{Symbol}}()
     for (origin, k) in net.routes
@@ -540,22 +748,25 @@ function check_blocking_acyclic(net::QueueNetwork)
     end
     seen = Dict{Symbol,Symbol}()   # :active during DFS, :done after
     function visit(v)
-        get(seen, v, :new) == :done && return
-        seen[v] == :active &&
-            throw(ArgumentError("blocking cycle through $v: a cycle of full " *
-                                ":block buffers is deadlock (check C3)"))
+        get(seen, v, :new) == :done && return nothing
+        seen[v] == :active && throw(
+            ArgumentError(
+                "blocking cycle through $v: a cycle of full " *
+                ":block buffers is deadlock (check C3)",
+            ),
+        )
         seen[v] = :active
         for w in get(edges, v, Symbol[])
             haskey(seen, w) || (seen[w] = :new)
             visit(w)
         end
-        seen[v] = :done
+        return seen[v] = :done
     end
     for v in keys(edges)
         haskey(seen, v) || (seen[v] = :new)
         visit(v)
     end
-    nothing
+    return nothing
 end
 
 """
@@ -563,8 +774,9 @@ end
 
 Check C4, advisory: solve the traffic equations for the statically-known
 kernels and report per-station utilization ρ = λ E[S] / servers at `θ`,
-warning at ρ ≥ 1. Mark-dependent routing and mark-reading service laws have
-no static visit ratios or means, so those stations are skipped — the census
+warning at ρ ≥ 1. Mark-dependent routing, mark-reading service laws, and
+state-reading service laws ([`InService`](@ref)/[`InBuffer`](@ref)) have no
+static visit ratios or means, so those stations are skipped — the census
 principle: report what the combinator values expose, silently invent nothing.
 """
 function stability(m::QueueGSMP, θ::AbstractVector)
@@ -575,7 +787,7 @@ function stability(m::QueueGSMP, θ::AbstractVector)
         svc = stn.service
         svc === nothing && continue
         reads_marks(svc) == Set{Symbol}() || continue
-        λ[s] = 1 / mean(builddist(svc, m.params, θ, NamedTuple(), 0.0))
+        λ[s] = 1 / mean(builddist(svc, m.params, θ, NamedTuple(), 0.0, NOSTATE))
     end
     # Traffic equations λ = inj + Pᵀλ along :always and :probabilistic
     # kernels (ByMark/RoundRobin splits are statically unknown), by fixpoint
@@ -611,10 +823,12 @@ function stability(m::QueueGSMP, θ::AbstractVector)
         svc = stn.service
         svc === nothing && continue
         reads_marks(svc) == Set{Symbol}() || continue
-        ρ = λ[s] * mean(builddist(svc, m.params, θ, NamedTuple(), 0.0)) /
-            stn.servers
+        # A state-reading law has no occupancy to read here; skip, do not
+        # invent one (its NOSTATE evaluation would throw).
+        isempty(reads_state(svc)) || continue
+        ρ = λ[s] * mean(builddist(svc, m.params, θ, NamedTuple(), 0.0, NOSTATE)) / stn.servers
         push!(out, (stn.name, ρ))
         ρ >= 1 && @warn "station $(stn.name) is unstable at this θ" ρ
     end
-    out
+    return out
 end

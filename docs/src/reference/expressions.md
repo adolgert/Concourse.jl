@@ -15,6 +15,8 @@ Param
 Mark
 Enab
 Const
+InService
+InBuffer
 ```
 
 ## Laws
@@ -34,4 +36,5 @@ checks are built on them.
 reads_params
 reads_marks
 reads_time
+reads_state
 ```
