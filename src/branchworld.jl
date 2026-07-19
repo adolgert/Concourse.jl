@@ -117,6 +117,11 @@ station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is refused too:
 pathwise branching is not guaranteed unbiased when event reordering changes
 an occupancy-dependent law — use the score estimator for those models.
 
+A [`populate!`](@ref) population follows the same rules: a θ-reading
+initial mark law is refused like a source's, and because a branchable world
+seeds from the zero-argument [`initial_state`](@ref), any *drawn* initial
+mark fails loudly at seeding — only draw-free populations branch.
+
 # Example
 
 ```julia

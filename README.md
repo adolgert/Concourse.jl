@@ -5,8 +5,9 @@
 [![CI](https://github.com/adolgert/Concourse.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/adolgert/Concourse.jl/actions/workflows/CI.yml)
 [![Coverage](https://codecov.io/gh/adolgert/Concourse.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/adolgert/Concourse.jl)
 
-Concourse builds queueing-network models, compiles each one to a generalized
-semi-Markov process (GSMP), simulates it with
+Concourse builds queueing-network models — open, closed, or mixed
+populations — compiles each one to a generalized semi-Markov process
+(GSMP), simulates it with
 [CompetingClocks.jl](https://github.com/adolgert/CompetingClocks.jl), and
 estimates derivatives of the output with
 [ClockGradients.jl](https://github.com/adolgert/ClockGradients.jl).

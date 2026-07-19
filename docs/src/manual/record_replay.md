@@ -138,6 +138,34 @@ srec2, slive = simulate(msplit, [1.0, 2.0, 2.0], 100.0; seed = 11, keep_states =
 all(states_equal(a, b) for (a, b) in zip(slive, replay(msplit, srec2)))
 ```
 
+## Firing 0: the init slot
+
+One kind of randomness happens before any clock fires. A network with a
+[`populate!`](@ref) population may draw the seeded jobs' initial marks
+at time zero, and those draws follow the same rule as every other
+auxiliary draw: recorded live, read back on replay. They live in the
+record's `init` list — the "firing 0" slot — keyed by the reserved
+pseudo-clock `(:init, 0, 0)`, in population declaration order.
+
+```@example recreplay
+net3 = QueueNetwork(param_names = (:mu,))
+station!(net3, :ring; service = Law(:Exponential, scale = Mark(:size) * inv(Param(:mu))))
+route!(net3, :ring, Always(:ring))
+populate!(net3, :ring, 3; mark = MarkLaw(size = Law(:Exponential, scale = Const(1.0))))
+mring = compile(net3)
+
+rrec = simulate(mring, [2.0], 100.0; seed = 5)
+rrec.init
+```
+
+`replay` and `time_average` seed the initial state from `rec.init`
+before folding the firings, so the determinism claim covers populated
+networks too; for a network without a population the slot is empty and
+seeding consumes nothing. The conduit's discipline also holds at firing
+0 — a truncated `init` list errors loudly rather than desynchronizing
+quietly. The [closed networks page](closed_networks.md) develops the
+populations that put this slot to work.
+
 ## Why this matters
 
 Determinism given the record is the foundation for everything that follows
