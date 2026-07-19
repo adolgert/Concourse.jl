@@ -342,6 +342,24 @@ function rybko_stolyar(; budget=768, priorities=:destabilizing)
     return compile(net)
 end
 
+# Two identical exponential servers behind one routing decision
+# (capability 8): source → kernel over (:a, :b) → sink. The default kernel
+# is join-the-shortest-queue by job count; pass the fair Bernoulli split for
+# the paired comparison, or any other two-destination kernel over the same
+# topology. Declaration order puts :a at the lower station index, so JSQ
+# ties break toward :a.
+function jsq_pair(; kernel=ShortestQueue(:a, :b))
+    net = QueueNetwork(; param_names=(:lambda, :mu))
+    source!(net, :arrive; interarrival=Law(:Exponential; scale=inv(Param(:lambda))))
+    station!(net, :a; service=Law(:Exponential; scale=inv(Param(:mu))))
+    station!(net, :b; service=Law(:Exponential; scale=inv(Param(:mu))))
+    sink!(net, :done)
+    route!(net, :arrive, kernel)
+    route!(net, :a, Always(:done))
+    route!(net, :b, Always(:done))
+    return compile(net)
+end
+
 # CONCOURSE_TEST_QUICK=1 shrinks replication counts for fast local iteration.
 const QUICK = get(ENV, "CONCOURSE_TEST_QUICK", "0") == "1"
 nreps(n) = QUICK ? max(4, n ÷ 8) : n

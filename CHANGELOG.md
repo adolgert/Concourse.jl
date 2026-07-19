@@ -10,6 +10,40 @@ and this project adheres to
 
 ### Added
 
+- Deterministic state-reading routing: `route!(net, from,
+  ShortestQueue(dests...; by = :requests))` sends each departing job to
+  the destination with the smallest occupancy, deterministically — ties
+  to the lowest station index. `by = :requests` (the default) counts the
+  jobs at the destination (waiting + in service + held blocked);
+  `by = :tokens` sums the remaining work (active jobs' counters plus
+  waiting jobs' full profiles) and requires every destination to be a
+  round station, which compile checks. Amendment A4 admits the kernel
+  because a deterministic function of state bears no likelihood: nothing
+  is drawn, nothing is recorded, and replay reproduces every decision
+  from the folded state (I1, I4). Randomized load balancing (power-of-d)
+  is likelihood-bearing and stays out of scope.
+- Estimator scope for `ShortestQueue` (I5): score gradients over records
+  remain valid (the decision contributes no likelihood factor); pathwise
+  IPA is not certified, because a perturbation that reorders events can
+  flip a routing decision discontinuously. `branch_world` refuses models
+  containing `ShortestQueue` in v1, the state-reading-law refusal
+  precedent.
+- `stability` treats `ShortestQueue` as an equal split across its
+  destinations — a documented approximation, exact under symmetry.
+- JSQ tests: tie-break-to-lowest-index and nothing-drawn on a crafted
+  deterministic trace; same-seed record identity and replay equality; the
+  symmetric M/M/2 JSQ mean-occupancy oracle against a truncated CTMC
+  solved in the test (with the truncation mass bounded); Dai Proposition
+  3's two-server boundary under `ShortestQueue(by = :tokens)` round
+  stations (stable at 0.9λ*, linear token growth at 1.1λ*); the paired
+  JSQ-beats-Bernoulli sojourn comparison; the equal-split stability
+  report; the check messages verbatim; the `branch_world` refusal. The
+  two-server `jsq_pair` builder joins `testmodels.jl`.
+- Docs: a "Joining the shortest queue" section on the networks tutorial
+  page (the A4 argument, both occupancy notions, the estimator caveat,
+  the stability approximation), `ShortestQueue` on the surface reference
+  page.
+
 - Round-based token service: `station!(...; rounds = Rounds(policy,
   duration, work))` serves a station in synchronous rounds. At each
   boundary the `RoundPolicy` plans the round through a read-only

@@ -51,6 +51,7 @@ Always
 ByMark
 Probabilistic
 RoundRobin
+ShortestQueue
 ```
 
 ## Unblock policies

@@ -167,6 +167,55 @@ struct RoundRobin <: Kernel
     dests::Vector{Symbol}
 end
 
+"""
+    ShortestQueue(dests::Symbol...; by = :requests)
+
+Join the shortest queue: each departing job goes to the candidate station
+with the smallest occupancy, deterministically — ties go to the station
+with the lowest index (declaration order), so the decision is a pure
+function of the state. Nothing is drawn and nothing is recorded;
+[`replay`](@ref) reproduces every decision from the folded state. `by`
+picks the occupancy notion:
+
+- `:requests` (the default): the total number of jobs at the destination —
+  waiting, in service, and held blocked.
+- `:tokens`: the total remaining work at the destination — the active
+  jobs' work counters plus the waiting jobs' full profiles. Valid only
+  when every destination is a round station ([`Rounds`](@ref)), because
+  only round stations keep work counters; [`compile`](@ref) rejects the
+  rest.
+
+Amendment A4 reserves *likelihood-bearing* decisions for recorded draws;
+`ShortestQueue` is admitted because a deterministic function of state
+bears no likelihood. What it costs is estimator smoothness: a θ
+perturbation that reorders events can flip a routing decision
+discontinuously, so score gradients remain valid (the decision
+contributes no likelihood factor) but pathwise IPA is not certified, and
+[`branch_world`](@ref) refuses models containing `ShortestQueue` in v1.
+Randomized load balancing (power-of-d choices) would be
+likelihood-bearing and is out of scope. `Concourse.stability` treats the
+kernel as an equal split across its destinations — exact under symmetry,
+an approximation otherwise.
+
+# Example
+
+```julia
+route!(net, :arrive, ShortestQueue(:a, :b))                 # by job count
+route!(net, :arrive, ShortestQueue(:gpu1, :gpu2; by = :tokens))  # by remaining work
+```
+"""
+struct ShortestQueue <: Kernel
+    dests::Vector{Symbol}
+    by::Symbol                # :requests | :tokens
+end
+function ShortestQueue(dests::Symbol...; by::Symbol=:requests)
+    length(dests) >= 2 || throw(ArgumentError("ShortestQueue needs at least two destinations"))
+    allunique(dests) || throw(ArgumentError("ShortestQueue destinations must be distinct"))
+    by in (:requests, :tokens) ||
+        throw(ArgumentError("ShortestQueue by must be :requests or :tokens, got $by"))
+    return ShortestQueue(collect(Symbol, dests), by)
+end
+
 # D2: who among the blocked upstream servers gets a freed buffer slot is
 # observable model semantics, declared per station, not an interpreter rule.
 abstract type UnblockPolicy end
@@ -602,9 +651,10 @@ end
     route!(net, origin::Symbol, kernel)
 
 Declare where jobs leaving the station named `origin` go. `kernel` is one
-of [`Always`](@ref), [`ByMark`](@ref), [`Probabilistic`](@ref), or
-[`RoundRobin`](@ref). Every source, station, and join needs exactly one
-route; sinks and forks take none. [`compile`](@ref) checks this.
+of [`Always`](@ref), [`ByMark`](@ref), [`Probabilistic`](@ref),
+[`RoundRobin`](@ref), or [`ShortestQueue`](@ref). Every source, station,
+and join needs exactly one route; sinks and forks take none.
+[`compile`](@ref) checks this.
 """
 function route!(net::QueueNetwork, origin::Symbol, kernel::Kernel)
     net.routes[origin] = kernel
@@ -651,11 +701,12 @@ end
 # interpreter, the checker, and the estimators all read.
 
 struct CompiledKernel
-    kind::Symbol              # :always | :bymark | :probabilistic | :roundrobin
+    kind::Symbol              # :always | :bymark | :probabilistic | :roundrobin | :shortestqueue
     dests::Vector{Int32}
     expr::Union{ScalarExpr,Nothing}
     cutoffs::Vector{Float64}
     probs::Vector{Float64}
+    by::Symbol                # :shortestqueue only; :none elsewhere
 end
 
 struct CompiledStation
@@ -730,23 +781,30 @@ struct QueueGSMP
 end
 
 function _compilekernel(k::Always, names)
-    return CompiledKernel(:always, Int32[names[k.dest]], nothing, Float64[], Float64[])
+    return CompiledKernel(:always, Int32[names[k.dest]], nothing, Float64[], Float64[], :none)
 end
 function _compilekernel(k::ByMark, names)
     length(k.dests) == length(k.cutoffs) + 1 ||
         throw(ArgumentError("ByMark needs one more destination than cutoffs"))
-    return CompiledKernel(:bymark, Int32[names[d] for d in k.dests], k.expr, k.cutoffs, Float64[])
+    return CompiledKernel(
+        :bymark, Int32[names[d] for d in k.dests], k.expr, k.cutoffs, Float64[], :none
+    )
 end
 function _compilekernel(k::Probabilistic, names)
     isapprox(sum(k.probs), 1.0; atol=1e-9) ||
         throw(ArgumentError("Probabilistic routing probabilities must sum to 1"))
     return CompiledKernel(
-        :probabilistic, Int32[names[d] for d in k.dests], nothing, Float64[], k.probs
+        :probabilistic, Int32[names[d] for d in k.dests], nothing, Float64[], k.probs, :none
     )
 end
 function _compilekernel(k::RoundRobin, names)
     return CompiledKernel(
-        :roundrobin, Int32[names[d] for d in k.dests], nothing, Float64[], Float64[]
+        :roundrobin, Int32[names[d] for d in k.dests], nothing, Float64[], Float64[], :none
+    )
+end
+function _compilekernel(k::ShortestQueue, names)
+    return CompiledKernel(
+        :shortestqueue, Int32[names[d] for d in k.dests], nothing, Float64[], Float64[], k.by
     )
 end
 
@@ -774,6 +832,9 @@ first violation:
   capacity is finite (check C10);
 - every source, station, and join has a route, and no sink or fork has one;
 - deterministic kernels ([`ByMark`](@ref)) read marks only;
+- every [`ShortestQueue`](@ref) destination is a service station, and under
+  `by = :tokens` a round station ([`Rounds`](@ref)), since only round
+  stations keep the work counters token occupancy sums;
 - every law reads only declared parameters and marks some source produces;
 - no cycle of finite `:block` buffers exists, because a full cycle would
   deadlock (check C3; skipped under `allow_blocking_cycles`);
@@ -932,6 +993,36 @@ function check_network(net::QueueNetwork, names, params; allow_blocking_cycles::
                 "likelihood-bearing decisions for recorded draws (check C5)",
             ),
         )
+    end
+    # ShortestQueue is the one state-reading kernel TYPE (C5's ban covers
+    # state-reading routing *expressions*; a deterministic function of state
+    # bears no likelihood, so A4 admits it). Its destinations must have an
+    # occupancy to compare: service stations for :requests, and for :tokens —
+    # remaining work — round stations specifically, since only round stations
+    # keep work counters.
+    stationof = Dict(s.name => s for s in net.stations)
+    for (origin, k) in net.routes
+        k isa ShortestQueue || continue
+        for d in k.dests           # every target is a declared station by here
+            dstn = stationof[d]
+            dstn.kind == :station || throw(
+                ArgumentError(
+                    "ShortestQueue at $origin routes to $d, which is a " *
+                    "$(dstn.kind); a shortest-queue destination must be a " *
+                    "service station — only stations have occupancy to compare",
+                ),
+            )
+            if k.by == :tokens && dstn.rounds === nothing
+                throw(
+                    ArgumentError(
+                        "ShortestQueue(by = :tokens) at $origin routes to $d, " *
+                        "which is not a round station; token occupancy is the " *
+                        "remaining work only round stations count — use " *
+                        "by = :requests, or make every destination a Rounds station",
+                    ),
+                )
+            end
+        end
     end
     allow_blocking_cycles || check_blocking_acyclic(net)
     check_state_reads(net, names)
@@ -1326,6 +1417,7 @@ _kerneldests(k::Always) = (k.dest,)
 _kerneldests(k::ByMark) = Tuple(k.dests)
 _kerneldests(k::Probabilistic) = Tuple(k.dests)
 _kerneldests(k::RoundRobin) = Tuple(k.dests)
+_kerneldests(k::ShortestQueue) = Tuple(k.dests)
 
 # Check C3: a cycle of stations that can transfer-block each other is a
 # deadlock reachable when every buffer in the cycle fills, and it is also the
@@ -1374,6 +1466,13 @@ state-reading service laws ([`InService`](@ref)/[`InBuffer`](@ref)) have no
 static visit ratios or means, so those stations are skipped — the census
 principle: report what the combinator values expose, silently invent nothing.
 
+A [`ShortestQueue`](@ref) kernel enters the traffic equations as an equal
+split across its destinations. This is a documented approximation, exact
+under symmetry (identical destinations receive equal long-run flow by
+exchangeability) and inexact otherwise — JSQ shifts flow toward
+faster-draining stations, so an asymmetric report errs conservatively for
+the fast stations and optimistically for the slow ones.
+
 A network with no sources (a closed network, populated by
 [`populate!`](@ref)) reports nothing: with a fixed population there is no
 arrival rate to outrun, so a closed network cannot be unstable.
@@ -1389,8 +1488,9 @@ function stability(m::QueueGSMP, θ::AbstractVector)
         reads_marks(svc) == Set{Symbol}() || continue
         λ[s] = 1 / mean(builddist(svc, m.params, θ, NamedTuple(), 0.0, NOSTATE))
     end
-    # Traffic equations λ = inj + Pᵀλ along :always and :probabilistic
-    # kernels (ByMark/RoundRobin splits are statically unknown), by fixpoint
+    # Traffic equations λ = inj + Pᵀλ along :always, :probabilistic, and
+    # :shortestqueue-as-equal-split kernels (ByMark/RoundRobin splits are
+    # statically unknown), by fixpoint
     # iteration: n passes reach every path of an acyclic network regardless
     # of declaration order.
     for _ in 1:n
@@ -1410,6 +1510,12 @@ function stability(m::QueueGSMP, θ::AbstractVector)
             elseif k.kind == :probabilistic
                 for (i, d) in enumerate(k.dests)
                     flow[d] += rate * k.probs[i]
+                end
+            elseif k.kind == :shortestqueue
+                # The documented equal-split approximation: exact under
+                # symmetry, advisory otherwise.
+                for d in k.dests
+                    flow[d] += rate / length(k.dests)
                 end
             end
         end

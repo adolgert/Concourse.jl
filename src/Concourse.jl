@@ -51,7 +51,7 @@ export Rounds, RoundPolicy, RoundView, RoundJob, RoundPlan, plan_round
 export FasterTransformerRule, VanillaVLLM, Orca, Sarathi, ClassPriority
 export ClassBudgets, FlowControl
 export FCFS, LCFS, SIRO, Priority, ProcessorSharing, SRPT
-export Always, ByMark, Probabilistic, RoundRobin, FCFSUnblock
+export Always, ByMark, Probabilistic, RoundRobin, ShortestQueue, FCFSUnblock
 # The IR and its contract functions
 export QueueGSMP, QueueState, ClockKey
 export initial_state, enabled, clock_distribution, fire_changes, states_equal

@@ -192,6 +192,58 @@ Same arrival rate, same server, one-fifth less queue — purely from smoothing
 the arrival stream. (For the curious: ``\sigma`` here is exactly
 ``(3-\sqrt 5)/2``, so the golden ratio is hiding in the round-robin queue.)
 
+## Joining the shortest queue
+
+Round robin smooths the arrival stream blindly. A real load balancer can do
+better by *looking*: send each job to whichever server currently holds the
+fewest. That is `ShortestQueue`, the one routing kernel that reads station
+state:
+
+```@example net
+jsq = split_model(ShortestQueue(:a, :b))
+est_j, se_j = replicate(r -> time_average(at_a(jsq), jsq, r), jsq, [2.0, 2.0], 2000.0, 16)
+println("shortest queue: L at server a = ", round(est_j, digits = 3), " ± ",
+        round(se_j, digits = 3))
+```
+
+Better than both the coin flips and the turn-taking — the join-the-shortest-
+queue (JSQ) system behaves nearly like a single pooled queue, because a
+server never idles while the other holds a waiting job. (There is no
+one-line formula this time; the exact value comes from solving the
+two-dimensional Markov chain numerically, which is how the test suite
+validates this kernel.)
+
+`ShortestQueue` is **deterministic**: the smallest occupancy wins, and a tie
+goes to the destination with the lowest station index (declaration order).
+Occupancy means the total number of jobs at the destination — waiting, in
+service, and held blocked. For round stations (token-serving stations
+declared with a `Rounds` config) there is a second notion,
+`ShortestQueue(dests...; by = :tokens)`, which compares total *remaining
+work* — the active jobs' token counters plus the waiting jobs' full
+profiles; it requires every destination to be a round station, since only
+round stations keep work counters.
+
+Why is a state-reading route allowed when a state-reading `ByMark`
+expression is rejected? Because nothing random happens: Concourse's design
+rule (amendment A4) is that every *likelihood-bearing* decision must flow
+through a recorded draw, and a deterministic function of the state bears no
+likelihood. A `ShortestQueue` decision draws nothing and records nothing —
+`replay` reproduces it by recomputing the occupancies from the folded
+state.
+
+Two caveats, both consequences of reading state:
+
+- **Gradients.** Score gradients over records remain valid — the decision
+  contributes no likelihood factor — but pathwise IPA is not certified: a
+  parameter perturbation that reorders two events can flip a routing
+  decision discontinuously. [`branch_world`](@ref) therefore refuses models
+  containing `ShortestQueue` in v1; use the score estimator over records.
+- **Stability reports.** `Concourse.stability`'s traffic equations
+  treat `ShortestQueue` as an equal split across its destinations. That is
+  exact under symmetry (identical destinations share the flow equally) and
+  an approximation otherwise, since JSQ shifts flow toward faster-draining
+  stations.
+
 ## Open versus closed networks
 
 Every network on this page is **open**: jobs enter from outside, circulate,

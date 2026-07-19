@@ -417,9 +417,47 @@ function routejob!(m::QueueGSMP, st::QueueState, origin::Int, j::JobId, draws::D
         c = st.cursor[origin]
         st.cursor[origin] = mod1(c + 1, length(k.dests))
         Int(k.dests[c])
+    elseif k.kind == :shortestqueue
+        # Deterministic state-reading routing (capability 8): the smallest
+        # occupancy wins, ties to the lowest station index. A4 admits it
+        # because a deterministic function of state bears no likelihood —
+        # nothing is drawn, nothing is recorded, and replay reproduces the
+        # decision from the folded state (I1, I4).
+        best = Int(k.dests[1])
+        bestocc = _jsq_occupancy(m, st, best, k.by)
+        for i in 2:length(k.dests)
+            d = Int(k.dests[i])
+            occ = _jsq_occupancy(m, st, d, k.by)
+            if occ < bestocc || (occ == bestocc && d < best)
+                best, bestocc = d, occ
+            end
+        end
+        best
     else
         error("unknown kernel kind $(k.kind)")
     end
+end
+
+# ShortestQueue's occupancy notions. :requests is the total number of jobs
+# at the station — waiting, in service, and held blocked (the number_at
+# convention). :tokens is the total remaining work at a round station:
+# active jobs' remaining counters plus waiting jobs' full profiles (the
+# counters they would get at admission) — compile guarantees every
+# destination is a round station whose work marks the waiting jobs carry.
+function _jsq_occupancy(m::QueueGSMP, st::QueueState, d::Int, by::Symbol)
+    by == :requests && return length(st.buf[d]) + length(st.srv[d]) + length(st.hold[d])
+    r = m.stations[d].rounds::Rounds
+    tot = 0
+    for j in st.srv[d]
+        tot += sum(st.work[j])
+    end
+    for j in st.buf[d]
+        marks = st.jobs[j]
+        for mk in r.work
+            tot += Int(getfield(marks, mk))
+        end
+    end
+    return tot
 end
 
 # ---------------------------------------------------------------------------
