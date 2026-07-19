@@ -167,6 +167,55 @@ struct RoundRobin <: Kernel
     dests::Vector{Symbol}
 end
 
+"""
+    ShortestQueue(dests::Symbol...; by = :requests)
+
+Join the shortest queue: each departing job goes to the candidate station
+with the smallest occupancy, deterministically — ties go to the station
+with the lowest index (declaration order), so the decision is a pure
+function of the state. Nothing is drawn and nothing is recorded;
+[`replay`](@ref) reproduces every decision from the folded state. `by`
+picks the occupancy notion:
+
+- `:requests` (the default): the total number of jobs at the destination —
+  waiting, in service, and held blocked.
+- `:tokens`: the total remaining work at the destination — the active
+  jobs' work counters plus the waiting jobs' full profiles. Valid only
+  when every destination is a round station ([`Rounds`](@ref)), because
+  only round stations keep work counters; [`compile`](@ref) rejects the
+  rest.
+
+Amendment A4 reserves *likelihood-bearing* decisions for recorded draws;
+`ShortestQueue` is admitted because a deterministic function of state
+bears no likelihood. What it costs is estimator smoothness: a θ
+perturbation that reorders events can flip a routing decision
+discontinuously, so score gradients remain valid (the decision
+contributes no likelihood factor) but pathwise IPA is not certified, and
+[`branch_world`](@ref) refuses models containing `ShortestQueue` in v1.
+Randomized load balancing (power-of-d choices) would be
+likelihood-bearing and is out of scope. `Concourse.stability` treats the
+kernel as an equal split across its destinations — exact under symmetry,
+an approximation otherwise.
+
+# Example
+
+```julia
+route!(net, :arrive, ShortestQueue(:a, :b))                 # by job count
+route!(net, :arrive, ShortestQueue(:gpu1, :gpu2; by = :tokens))  # by remaining work
+```
+"""
+struct ShortestQueue <: Kernel
+    dests::Vector{Symbol}
+    by::Symbol                # :requests | :tokens
+end
+function ShortestQueue(dests::Symbol...; by::Symbol=:requests)
+    length(dests) >= 2 || throw(ArgumentError("ShortestQueue needs at least two destinations"))
+    allunique(dests) || throw(ArgumentError("ShortestQueue destinations must be distinct"))
+    by in (:requests, :tokens) ||
+        throw(ArgumentError("ShortestQueue by must be :requests or :tokens, got $by"))
+    return ShortestQueue(collect(Symbol, dests), by)
+end
+
 # D2: who among the blocked upstream servers gets a freed buffer slot is
 # observable model semantics, declared per station, not an interpreter rule.
 abstract type UnblockPolicy end
@@ -232,6 +281,8 @@ struct SurfaceStation
     need::Int                             # joins only: siblings that trigger the merge
     cancel::Symbol                        # joins only: :none | :on_completion | :on_start
     batching::Union{Batching,Nothing}     # stations only
+    remark::Union{MarkLaw,Nothing}        # stations only: mark redraw on deposit
+    rounds::Union{Rounds,Nothing}         # stations only: round-based token service
 end
 
 # One populate! declaration: `count` jobs seeded at `station` before time
@@ -319,18 +370,23 @@ function source!(
             0,
             :none,
             nothing,
+            nothing,
+            nothing,
         ),
     )
 end
 
 """
-    station!(net, name::Symbol; service, discipline=FCFS(), servers=1,
+    station!(net, name::Symbol; service=nothing, discipline=FCFS(), servers=1,
              capacity=typemax(Int), overflow=:drop, unblock=FCFSUnblock(),
-             patience=nothing, renege_to=nothing, batching=nothing)
+             patience=nothing, renege_to=nothing, batching=nothing,
+             remark=nothing, rounds=nothing)
 
 Add a service station called `name` to the network.
 
-- `service`: the service-time law, required. It may read parameters, the
+- `service`: the service-time law, required unless `rounds` is given (a
+  round station's duration lives in its [`Rounds`](@ref) config, check
+  C12). It may read parameters, the
   job's marks, and the enabling time. Alone among laws it may also read
   live station occupancy through [`InService`](@ref)/[`InBuffer`](@ref)
   (check C5); such a law is re-evaluated whenever a watched count changes,
@@ -362,6 +418,28 @@ Add a service station called `name` to the network.
   the service law to read, and on completion the members route
   individually. Batching requires the [`FCFS`](@ref) discipline
   (check C6).
+- `remark`: a `NamedTuple` of laws (or a [`MarkLaw`](@ref)), or `nothing`
+  (the default). The laws are drawn when a job is deposited into the
+  station from *outside* and merged over the job's marks — same names
+  replace, new names extend — before the discipline or the service law
+  reads them, so an `:ordered` insert files the job by its new values.
+  Every remark law is evaluated against the job's *pre-redraw* marks,
+  then the drawn values merge, so a pair of laws reading each other's
+  names swaps them. Re-files within the station — an evicted job's
+  return, an unblocked transfer's admission (the redraw happened at the
+  deposit that blocked it) — redraw nothing. Remark draws flow through
+  the depositing firing's draw source and land in the record like any
+  mark draw; a remark law may not read station state (check C11), and a
+  remark-only mark is readable at this station and downstream of it,
+  never upstream.
+- `rounds`: a [`Rounds`](@ref) config, or `nothing` (the default). Under
+  rounds the station serves in synchronous rounds: at each boundary the
+  config's [`RoundPolicy`](@ref) admits and evicts jobs and allocates
+  integer tokens to active ones, one station-level clock runs the round
+  under the config's duration law, and per-job work counters persist
+  across rounds. Check C12 fixes the shape — FCFS, no `batching`,
+  `servers = 1`, no `service` law — and the config's `work` marks must
+  be produced upstream and be integers ≥ 0 at admission.
 
 A station needs a [`route!`](@ref) saying where finished jobs go.
 """
@@ -370,16 +448,22 @@ function station!(
     name::Symbol;
     discipline::Discipline=FCFS(),
     servers::Int=1,
-    service::AbstractLaw,
+    service::Union{AbstractLaw,Nothing}=nothing,
     capacity::Int=typemax(Int),
     overflow::Symbol=:drop,
     unblock::UnblockPolicy=FCFSUnblock(),
     patience::Union{AbstractLaw,Nothing}=nothing,
     renege_to::Union{Symbol,Nothing}=nothing,
     batching::Union{Batching,Nothing}=nothing,
+    remark::Union{MarkLaw,NamedTuple,Nothing}=nothing,
+    rounds::Union{Rounds,Nothing}=nothing,
 )
     (patience === nothing) == (renege_to === nothing) ||
         throw(ArgumentError("patience and renege_to come together"))
+    service === nothing &&
+        rounds === nothing &&
+        throw(ArgumentError("station $name needs a service law (or a rounds config)"))
+    rml = remark isa NamedTuple ? MarkLaw(; remark...) : remark
     return _addstation!(
         net,
         SurfaceStation(
@@ -399,6 +483,8 @@ function station!(
             0,
             :none,
             batching,
+            rml,
+            rounds,
         ),
     )
 end
@@ -429,6 +515,8 @@ function sink!(net::QueueNetwork, name::Symbol)
             0,
             0,
             :none,
+            nothing,
+            nothing,
             nothing,
         ),
     )
@@ -475,6 +563,8 @@ function fork!(net::QueueNetwork, name::Symbol; branches)
             0,
             0,
             :none,
+            nothing,
+            nothing,
             nothing,
         ),
     )
@@ -551,6 +641,8 @@ function join!(net::QueueNetwork, name::Symbol; parts::Int, need::Int=parts, can
             need,
             cancel,
             nothing,
+            nothing,
+            nothing,
         ),
     )
 end
@@ -559,9 +651,10 @@ end
     route!(net, origin::Symbol, kernel)
 
 Declare where jobs leaving the station named `origin` go. `kernel` is one
-of [`Always`](@ref), [`ByMark`](@ref), [`Probabilistic`](@ref), or
-[`RoundRobin`](@ref). Every source, station, and join needs exactly one
-route; sinks and forks take none. [`compile`](@ref) checks this.
+of [`Always`](@ref), [`ByMark`](@ref), [`Probabilistic`](@ref),
+[`RoundRobin`](@ref), or [`ShortestQueue`](@ref). Every source, station,
+and join needs exactly one route; sinks and forks take none.
+[`compile`](@ref) checks this.
 """
 function route!(net::QueueNetwork, origin::Symbol, kernel::Kernel)
     net.routes[origin] = kernel
@@ -608,11 +701,12 @@ end
 # interpreter, the checker, and the estimators all read.
 
 struct CompiledKernel
-    kind::Symbol              # :always | :bymark | :probabilistic | :roundrobin
+    kind::Symbol              # :always | :bymark | :probabilistic | :roundrobin | :shortestqueue
     dests::Vector{Int32}
     expr::Union{ScalarExpr,Nothing}
     cutoffs::Vector{Float64}
     probs::Vector{Float64}
+    by::Symbol                # :shortestqueue only; :none elsewhere
 end
 
 struct CompiledStation
@@ -638,6 +732,8 @@ struct CompiledStation
     # the stamp is unambiguous and the runtime needs no group-to-join map.
     cancel_join::Int32
     batching::Union{Batching,Nothing}   # stations only
+    remark::Union{MarkLaw,Nothing}      # stations only: mark redraw on deposit
+    rounds::Union{Rounds,Nothing}       # stations only: round-based token service
 end
 
 # A populate! entry in station-index form, in declaration order — the order
@@ -685,23 +781,30 @@ struct QueueGSMP
 end
 
 function _compilekernel(k::Always, names)
-    return CompiledKernel(:always, Int32[names[k.dest]], nothing, Float64[], Float64[])
+    return CompiledKernel(:always, Int32[names[k.dest]], nothing, Float64[], Float64[], :none)
 end
 function _compilekernel(k::ByMark, names)
     length(k.dests) == length(k.cutoffs) + 1 ||
         throw(ArgumentError("ByMark needs one more destination than cutoffs"))
-    return CompiledKernel(:bymark, Int32[names[d] for d in k.dests], k.expr, k.cutoffs, Float64[])
+    return CompiledKernel(
+        :bymark, Int32[names[d] for d in k.dests], k.expr, k.cutoffs, Float64[], :none
+    )
 end
 function _compilekernel(k::Probabilistic, names)
     isapprox(sum(k.probs), 1.0; atol=1e-9) ||
         throw(ArgumentError("Probabilistic routing probabilities must sum to 1"))
     return CompiledKernel(
-        :probabilistic, Int32[names[d] for d in k.dests], nothing, Float64[], k.probs
+        :probabilistic, Int32[names[d] for d in k.dests], nothing, Float64[], k.probs, :none
     )
 end
 function _compilekernel(k::RoundRobin, names)
     return CompiledKernel(
-        :roundrobin, Int32[names[d] for d in k.dests], nothing, Float64[], Float64[]
+        :roundrobin, Int32[names[d] for d in k.dests], nothing, Float64[], Float64[], :none
+    )
+end
+function _compilekernel(k::ShortestQueue, names)
+    return CompiledKernel(
+        :shortestqueue, Int32[names[d] for d in k.dests], nothing, Float64[], Float64[], k.by
     )
 end
 
@@ -729,6 +832,9 @@ first violation:
   capacity is finite (check C10);
 - every source, station, and join has a route, and no sink or fork has one;
 - deterministic kernels ([`ByMark`](@ref)) read marks only;
+- every [`ShortestQueue`](@ref) destination is a service station, and under
+  `by = :tokens` a round station ([`Rounds`](@ref)), since only round
+  stations keep the work counters token occupancy sums;
 - every law reads only declared parameters and marks some source produces;
 - no cycle of finite `:block` buffers exists, because a full cycle would
   deadlock (check C3; skipped under `allow_blocking_cycles`);
@@ -737,6 +843,17 @@ first violation:
   station (check C5);
 - every station that declares [`Batching`](@ref) uses the non-preemptive
   FCFS discipline (check C6);
+- every station that declares [`Rounds`](@ref) has the round-station
+  shape — non-preemptive `:back`-insert FCFS, no `batching`,
+  `servers = 1`, no `service` law — and its `work` marks are produced
+  upstream (check C12);
+- every rounds duration law reads only the plan's frozen aggregates —
+  `tokens`, `requests`, and the per-phase sums named by the `work`
+  marks — and no station state (check C13);
+- remark laws obey source-mark-law scope — no station-state reads
+  (check C11) — and read only marks the job carries *before* the redraw;
+  a remark-only mark is readable at the remark station and downstream of
+  it, never upstream;
 - a fork's siblings can reach at most one canceling join, so which join
   triggers a group's cancellation is unambiguous (check C8);
 - every station on a tracked branch — strictly between a fork and its
@@ -774,6 +891,8 @@ function compile(net::QueueNetwork; allow_blocking_cycles::Bool=false)
                 s.cancel,
                 cj,
                 s.batching,
+                s.remark,
+                s.rounds,
             ),
         )
     end
@@ -875,36 +994,178 @@ function check_network(net::QueueNetwork, names, params; allow_blocking_cycles::
             ),
         )
     end
+    # ShortestQueue is the one state-reading kernel TYPE (C5's ban covers
+    # state-reading routing *expressions*; a deterministic function of state
+    # bears no likelihood, so A4 admits it). Its destinations must have an
+    # occupancy to compare: service stations for :requests, and for :tokens —
+    # remaining work — round stations specifically, since only round stations
+    # keep work counters.
+    stationof = Dict(s.name => s for s in net.stations)
+    for (origin, k) in net.routes
+        k isa ShortestQueue || continue
+        for d in k.dests           # every target is a declared station by here
+            dstn = stationof[d]
+            dstn.kind == :station || throw(
+                ArgumentError(
+                    "ShortestQueue at $origin routes to $d, which is a " *
+                    "$(dstn.kind); a shortest-queue destination must be a " *
+                    "service station — only stations have occupancy to compare",
+                ),
+            )
+            if k.by == :tokens && dstn.rounds === nothing
+                throw(
+                    ArgumentError(
+                        "ShortestQueue(by = :tokens) at $origin routes to $d, " *
+                        "which is not a round station; token occupancy is the " *
+                        "remaining work only round stations count — use " *
+                        "by = :requests, or make every destination a Rounds station",
+                    ),
+                )
+            end
+        end
+    end
     allow_blocking_cycles || check_blocking_acyclic(net)
     check_state_reads(net, names)
     check_batching(net)
-    # A batch station's synthetic batch job carries the mark `batchsize`, so
-    # its service law alone may read that mark on top of what sources produce.
-    batch_marks = union(produced_marks, (:batchsize,))
+    check_rounds(net)
+    # Mark redraw on deposit: a remark-produced mark exists on jobs only from
+    # the redraw onward, so its availability is placement-aware — the remark
+    # station itself and everything downstream — while source and populate!
+    # marks keep C2's conservative global availability.
+    remark_at, remark_before = _remark_availability(net)
     for s in net.stations
         s.renege_to === nothing ||
             haskey(names, s.renege_to) ||
             throw(ArgumentError("renege_to at $(s.name) targets unknown station $(s.renege_to)"))
-        service_marks = s.batching === nothing ? produced_marks : batch_marks
-        for (law, allowed) in ((s.service, service_marks), (s.patience, produced_marks))
+        avail = union(produced_marks, get(remark_at, s.name, Set{Symbol}()))
+        # A batch station's synthetic batch job carries the mark `batchsize`,
+        # so its service law alone may read that mark on top of the rest.
+        service_marks = s.batching === nothing ? avail : union(avail, (:batchsize,))
+        for (law, allowed) in ((s.service, service_marks), (s.patience, avail))
             law === nothing && continue
             for p in reads_params(law)
                 haskey(params, p) ||
                     throw(ArgumentError("law at $(s.name) reads unknown parameter $p"))
             end
             # C2, conservatively: any read mark must be produced by some
-            # source or populate! entry. The routing-graph dataflow
-            # refinement is future work.
+            # source or populate! entry, or by a remark at or upstream of
+            # this station. The routing-graph dataflow refinement for
+            # source marks is future work.
             for mk in reads_marks(law)
                 mk in allowed || throw(
                     ArgumentError(
-                        "law at $(s.name) reads mark $mk no source or populate! produces"
+                        "law at $(s.name) reads mark $mk no source, populate!, " *
+                        "or upstream remark produces",
                     ),
                 )
             end
         end
+        # A round station's work marks are its admission-time inputs, so the
+        # same availability census applies (check C12); its duration law is
+        # evaluated against the plan's frozen aggregates only, never job
+        # marks or live state (check C13).
+        if s.rounds !== nothing
+            for mk in s.rounds.work
+                mk in avail || throw(
+                    ArgumentError(
+                        "rounds at $(s.name) names work mark $mk no source, " *
+                        "populate!, or upstream remark produces (check C12)",
+                    ),
+                )
+            end
+            dur = s.rounds.duration
+            for p in reads_params(dur)
+                haskey(params, p) || throw(
+                    ArgumentError("rounds duration law at $(s.name) reads unknown parameter $p")
+                )
+            end
+            agg = union(Set{Symbol}((:tokens, :requests)), Set{Symbol}(s.rounds.work))
+            for mk in reads_marks(dur)
+                mk in agg || throw(
+                    ArgumentError(
+                        "rounds duration law at $(s.name) reads mark $mk, which is not " *
+                        "a round aggregate; the duration law reads only the plan's " *
+                        "frozen aggregates — tokens, requests, and the per-phase sums " *
+                        "$(Tuple(s.rounds.work)) (check C13)",
+                    ),
+                )
+            end
+            isempty(reads_state(dur)) || throw(
+                ArgumentError(
+                    "rounds duration law at $(s.name) reads station state; a round's " *
+                    "duration is frozen at the boundary and reads only the plan's " *
+                    "aggregates (check C13)",
+                ),
+            )
+        end
+        # Remark laws read the job's PRE-redraw marks, so their census is the
+        # availability just before the redraw: sources, populations, and
+        # remarks strictly upstream (this station's own names only if a cycle
+        # carries them back in).
+        if s.remark !== nothing
+            pre = union(produced_marks, get(remark_before, s.name, Set{Symbol}()))
+            for (name, law) in s.remark.laws
+                for p in reads_params(law)
+                    haskey(params, p) || throw(
+                        ArgumentError("remark law $name at $(s.name) reads unknown parameter $p"),
+                    )
+                end
+                for mk in reads_marks(law)
+                    mk in pre || throw(
+                        ArgumentError(
+                            "remark law $name at $(s.name) reads mark $mk, which is " *
+                            "not on the job before the redraw — remark laws read the " *
+                            "PRE-redraw marks",
+                        ),
+                    )
+                end
+            end
+        end
     end
     return nothing
+end
+
+# The placement half of the mark census (capability 7). For every station q
+# with a remark, its mark names are available to laws AT q (the redraw runs
+# before disciplines or laws read marks) and at every station reachable
+# downstream of q. `at[s]` collects the names readable by laws at s;
+# `before[s]` collects those already on the job when a redraw at s runs —
+# what s's own remark laws may read under the pre-redraw convention, which
+# includes s's own names only when a cycle routes them back into s.
+function _remark_availability(net::QueueNetwork)
+    byname = Dict(s.name => s for s in net.stations)
+    at = Dict{Symbol,Set{Symbol}}()
+    before = Dict{Symbol,Set{Symbol}}()
+    for q in net.stations
+        q.remark === nothing && continue
+        names_q = marknames(q.remark)
+        union!(get!(at, q.name, Set{Symbol}()), names_q)
+        seen = Set{Symbol}()
+        stack = _downstream(net, byname, q.name)
+        while !isempty(stack)
+            v = pop!(stack)
+            v in seen && continue
+            push!(seen, v)
+            union!(get!(at, v, Set{Symbol}()), names_q)
+            union!(get!(before, v, Set{Symbol}()), names_q)
+            append!(stack, _downstream(net, byname, v))
+        end
+    end
+    return at, before
+end
+
+# One-hop routing successors of a station: kernel destinations (fork
+# branches for a fork) plus the renege destination — every edge a job can
+# take out of it.
+function _downstream(net::QueueNetwork, byname, v::Symbol)
+    s = byname[v]
+    dests = Symbol[]
+    s.kind == :fork && append!(dests, s.branches)
+    s.kind == :fork ||
+        !haskey(net.routes, v) ||
+        append!(dests, collect(_kerneldests(net.routes[v])))
+    s.renege_to === nothing || push!(dests, s.renege_to)
+    return dests
 end
 
 # Check C5: only the service law of a station may read station occupancy
@@ -937,6 +1198,22 @@ function check_state_reads(net::QueueNetwork, names)
                         "mark law $mk at $(s.name) reads station state; state in a " *
                         "mark law would put station state into the record's mark " *
                         "draws, breaking replay — amendment A4 (check C5)",
+                    ),
+                )
+            end
+        end
+        # Check C11: remark laws obey source-mark-law scope. Their draws are
+        # mark draws in the record, so the C5 argument applies verbatim —
+        # state in the draw would break replay — but the check gets its own
+        # number because remark is a station-side law, not a source's.
+        if s.remark !== nothing
+            for (mk, law) in s.remark.laws
+                isempty(reads_state(law)) || throw(
+                    ArgumentError(
+                        "remark law $mk at $(s.name) reads station state; remark laws " *
+                        "obey source-mark-law scope, and state in a mark draw would " *
+                        "put station state into the record's mark draws, breaking " *
+                        "replay — amendment A4 (check C11)",
                     ),
                 )
             end
@@ -1004,6 +1281,46 @@ function check_batching(net::QueueNetwork)
                 ),
             )
         end
+    end
+    return nothing
+end
+
+# Check C12, the structural half: round service composes with exactly the
+# plain FCFS station shape. The plan is committed in FCFS view order without
+# draws, active jobs must never be preempted or reordered (the C6 argument),
+# the one round clock IS the server, batch formation is the policy's
+# business, and the duration lives in the Rounds config, not a service law.
+function check_rounds(net::QueueNetwork)
+    for s in net.stations
+        s.rounds === nothing && continue
+        s.service === nothing || throw(
+            ArgumentError(
+                "station $(s.name) declares both service and rounds; a round " *
+                "station takes its duration from the Rounds config (check C12)",
+            ),
+        )
+        if s.discipline.name != :fcfs
+            throw(
+                ArgumentError(
+                    "station $(s.name) declares rounds under the " *
+                    "$(s.discipline.name) discipline; round service requires the " *
+                    "non-preemptive :back-insert FCFS discipline (check C12)",
+                ),
+            )
+        end
+        s.batching === nothing || throw(
+            ArgumentError(
+                "station $(s.name) declares both rounds and batching; the round " *
+                "policy owns batch formation (check C12)",
+            ),
+        )
+        s.servers == 1 || throw(
+            ArgumentError(
+                "station $(s.name) declares rounds with servers = $(s.servers); " *
+                "the round clock is the station's single server, so rounds fixes " *
+                "servers = 1 (check C12)",
+            ),
+        )
     end
     return nothing
 end
@@ -1100,6 +1417,7 @@ _kerneldests(k::Always) = (k.dest,)
 _kerneldests(k::ByMark) = Tuple(k.dests)
 _kerneldests(k::Probabilistic) = Tuple(k.dests)
 _kerneldests(k::RoundRobin) = Tuple(k.dests)
+_kerneldests(k::ShortestQueue) = Tuple(k.dests)
 
 # Check C3: a cycle of stations that can transfer-block each other is a
 # deadlock reachable when every buffer in the cycle fills, and it is also the
@@ -1148,6 +1466,13 @@ state-reading service laws ([`InService`](@ref)/[`InBuffer`](@ref)) have no
 static visit ratios or means, so those stations are skipped — the census
 principle: report what the combinator values expose, silently invent nothing.
 
+A [`ShortestQueue`](@ref) kernel enters the traffic equations as an equal
+split across its destinations. This is a documented approximation, exact
+under symmetry (identical destinations receive equal long-run flow by
+exchangeability) and inexact otherwise — JSQ shifts flow toward
+faster-draining stations, so an asymmetric report errs conservatively for
+the fast stations and optimistically for the slow ones.
+
 A network with no sources (a closed network, populated by
 [`populate!`](@ref)) reports nothing: with a fixed population there is no
 arrival rate to outrun, so a closed network cannot be unstable.
@@ -1163,8 +1488,9 @@ function stability(m::QueueGSMP, θ::AbstractVector)
         reads_marks(svc) == Set{Symbol}() || continue
         λ[s] = 1 / mean(builddist(svc, m.params, θ, NamedTuple(), 0.0, NOSTATE))
     end
-    # Traffic equations λ = inj + Pᵀλ along :always and :probabilistic
-    # kernels (ByMark/RoundRobin splits are statically unknown), by fixpoint
+    # Traffic equations λ = inj + Pᵀλ along :always, :probabilistic, and
+    # :shortestqueue-as-equal-split kernels (ByMark/RoundRobin splits are
+    # statically unknown), by fixpoint
     # iteration: n passes reach every path of an acyclic network regardless
     # of declaration order.
     for _ in 1:n
@@ -1184,6 +1510,12 @@ function stability(m::QueueGSMP, θ::AbstractVector)
             elseif k.kind == :probabilistic
                 for (i, d) in enumerate(k.dests)
                     flow[d] += rate * k.probs[i]
+                end
+            elseif k.kind == :shortestqueue
+                # The documented equal-split approximation: exact under
+                # symmetry, advisory otherwise.
+                for d in k.dests
+                    flow[d] += rate / length(k.dests)
                 end
             end
         end

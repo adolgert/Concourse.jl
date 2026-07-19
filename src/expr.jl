@@ -15,8 +15,11 @@ occupancy ([`reads_state`](@ref)).
 The leaves are [`Param`](@ref), [`Mark`](@ref), [`Enab`](@ref),
 [`Const`](@ref), [`InService`](@ref), and [`InBuffer`](@ref). Expressions
 combine with `+`, `-`, `*`, `/`, `inv`, `log`,
-`exp`, `sqrt`, `min`, and `max`. A bare number in arithmetic with an
-expression is promoted to a `Const`.
+`exp`, `sqrt`, `min`, `max`, `ceil`, and `floor`. A bare number in
+arithmetic with an expression is promoted to a `Const`. The staircase
+functions `ceil` and `floor` are flat almost everywhere, so a parameter
+inside their argument contributes no pathwise derivative — genuinely, not
+as an approximation (a dual number entering them leaves as a constant).
 
 # Example
 
@@ -125,7 +128,7 @@ for op in (:+, :-, :*, :/)
     @eval Base.$op(a::ScalarExpr, b::Real) = Apply(Symbol($op), ScalarExpr[a, asexpr(b)])
     @eval Base.$op(a::Real, b::ScalarExpr) = Apply(Symbol($op), ScalarExpr[asexpr(a), b])
 end
-for op in (:inv, :log, :exp, :sqrt, :-)
+for op in (:inv, :log, :exp, :sqrt, :-, :ceil, :floor)
     @eval Base.$op(a::ScalarExpr) = Apply(Symbol($op), ScalarExpr[a])
 end
 Base.min(a::ScalarExpr, b::ScalarExpr) = Apply(:min, ScalarExpr[a, b])
@@ -211,6 +214,12 @@ const _OPS = Dict{Symbol,Function}(
     :sqrt => sqrt,
     :min => min,
     :max => max,
+    # Staircases for token-block timing (Dai's c + a·⌈b/b0⌉): zero derivative
+    # almost everywhere, which is exact — ForwardDiff's ceil/floor of a dual
+    # return the plain rounded value, dropping the partials, consistent with
+    # I3 because the staircase is genuinely flat between its jumps.
+    :ceil => ceil,
+    :floor => floor,
 )
 
 # `params` maps a Param name to its index in the θ vector; built at compile

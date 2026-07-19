@@ -6,9 +6,10 @@
     ClockKey
 
 The identity of a clock: a tuple `(family, station, job)`. `family` is the
-clock family — `:arrival`, `:service`, or `:patience`. `station` is the
-station index in the compiled model. `job` is the job id, or `0` for an
-arrival clock, which belongs to the source rather than to a job. Clock keys
+clock family — `:arrival`, `:service`, `:patience`, or `:round`. `station`
+is the station index in the compiled model. `job` is the job id, or `0`
+for an arrival clock, which belongs to the source rather than to a job,
+and for a round clock, which belongs to the station's running round. Clock keys
 appear in [`MarkedRecord`](@ref)s, in the deltas of
 [`fire_changes`](@ref), and as sampler keys.
 """
@@ -30,6 +31,15 @@ for nested forks), and `started` counts, per group racing toward a
 `batchmembers` maps a synthetic batch job to the member jobs it gathered
 (members stay in `jobs` but appear in no station vector), and `cursor`
 holds each [`RoundRobin`](@ref) kernel's position.
+
+Round service ([`Rounds`](@ref)) adds two replay-owned fields: `work`
+maps each job active at a round station to its remaining integer work per
+phase (created at admission, deleted at departure or eviction), and
+`roundplan` holds, per station, the running round's committed
+[`RoundPlan`](@ref) — its frozen allocation and aggregates — or `nothing`
+when the station is between rounds. A `RoundPlan` in a slot is immutable:
+state transitions replace the slot, never the plan's vectors, so copies
+of the state may share it.
 
 The state also carries the clock bookkeeping that determines future
 behavior, so the sampler can be a pure consumer of it: `te` holds each
@@ -54,6 +64,8 @@ mutable struct QueueState
     started::Dict{JobId,Int}        # group racing to an :on_start join => siblings started
     batchmembers::Dict{JobId,Vector{JobId}}     # batch job => members, in gather order
     cursor::Vector{Int}             # RoundRobin state, in the IR so replay reproduces it
+    work::Dict{JobId,Vector{Int}}   # round stations: remaining work per phase
+    roundplan::Vector{Union{RoundPlan,Nothing}} # per station, the running round's plan
     te::Dict{ClockKey,Float64}
     bank::Dict{ClockKey,Float64}
     # Processor sharing (A1 addendum): te stays at the ORIGINAL enabling so
@@ -113,6 +125,8 @@ function _empty_state(m::QueueGSMP)
         Dict{JobId,Int}(),
         Dict{JobId,Vector{JobId}}(),
         ones(Int, n),
+        Dict{JobId,Vector{Int}}(),
+        Union{RoundPlan,Nothing}[nothing for _ in 1:n],
         Dict{ClockKey,Float64}(),
         Dict{ClockKey,Float64}(),
         Dict{ClockKey,Float64}(),
@@ -139,6 +153,10 @@ function copystate(st::QueueState)
         copy(st.started),
         Dict(b => copy(v) for (b, v) in st.batchmembers),
         copy(st.cursor),
+        Dict(j => copy(v) for (j, v) in st.work),
+        # RoundPlans are immutable once committed (slots are replaced, never
+        # the plans' vectors), so a shallow slot copy is a safe deep copy.
+        copy(st.roundplan),
         copy(st.te),
         copy(st.bank),
         copy(st.anchor),
@@ -168,6 +186,8 @@ function states_equal(a::QueueState, b::QueueState)
            a.started == b.started &&
            a.batchmembers == b.batchmembers &&
            a.cursor == b.cursor &&
+           a.work == b.work &&
+           a.roundplan == b.roundplan &&
            a.te == b.te &&
            a.bank == b.bank &&
            a.anchor == b.anchor

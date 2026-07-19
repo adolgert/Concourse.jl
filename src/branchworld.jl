@@ -45,17 +45,64 @@ mutable struct ConcourseWorld{C}
     time::Float64
 end
 
-function _assert_thetafree_marks(m::QueueGSMP)
+# Round stations stay out of branchable worlds in v1: a round plan is a
+# deterministic map of the whole queue composition, so pathwise branching
+# across event reorderings has no certified unbiasedness argument, and a
+# Dirac round duration bears no density for the score channel either. Score
+# gradients for θ in the arrival, mark, or remark laws feeding a round
+# station remain available over records (replay_model).
+function _assert_no_rounds(m::QueueGSMP)
     for stn in m.stations
-        stn.mark === nothing && continue
-        for (name, law) in stn.mark.laws
-            ps = reads_params(law)
-            isempty(ps) || throw(
-                ArgumentError(
-                    "branchable worlds support θ-free marks only for now; mark " *
-                    "$name of $(stn.name) reads parameters $(sort!(collect(ps)))",
-                ),
-            )
+        stn.rounds === nothing || throw(
+            ArgumentError(
+                "branchable worlds do not support round stations in v1; station " *
+                "$(stn.name) declares rounds — use the score estimator over records " *
+                "for θ in the laws feeding it",
+            ),
+        )
+    end
+    return nothing
+end
+
+# Deterministic state-reading routing stays out of branchable worlds in v1
+# for the state-reading-law reason: pathwise branching replays one event
+# order against another, and when reordering changes an occupancy, a
+# ShortestQueue decision flips discontinuously — the clone-based estimators'
+# unbiasedness argument does not cover that coupling. The decision bears no
+# likelihood, so score gradients over records (replay_model) stay valid.
+function _assert_no_shortest_queue(m::QueueGSMP)
+    for stn in m.stations
+        stn.routing === nothing && continue
+        stn.routing.kind == :shortestqueue || continue
+        throw(
+            ArgumentError(
+                "branchable worlds do not support ShortestQueue routing in v1; " *
+                "the route from $(stn.name) reads station occupancy, and pathwise " *
+                "branching is not guaranteed unbiased when event reordering flips " *
+                "a state-reading routing decision — use the score estimator over " *
+                "records instead",
+            ),
+        )
+    end
+    return nothing
+end
+
+function _assert_thetafree_marks(m::QueueGSMP)
+    # Remark laws are mark laws drawn at deposit instead of at birth; a
+    # θ-reading remark would add the same unimplemented derivative term as a
+    # θ-reading source mark, so the refusal extends verbatim.
+    for stn in m.stations
+        for (kindword, ml) in (("mark", stn.mark), ("remark", stn.remark))
+            ml === nothing && continue
+            for (name, law) in ml.laws
+                ps = reads_params(law)
+                isempty(ps) || throw(
+                    ArgumentError(
+                        "branchable worlds support θ-free marks only for now; $kindword " *
+                        "$name of $(stn.name) reads parameters $(sort!(collect(ps)))",
+                    ),
+                )
+            end
         end
     end
     # Population mark laws are mark laws; a θ-reading initial mark would add
@@ -110,12 +157,19 @@ redraw-at-next method would fail `ClockGradients.check_branchable`
 honestly.
 
 Marks, [`Probabilistic`](@ref) routing, and [`SIRO`](@ref) are admitted
-because their draws are θ-free. A mark law that reads a parameter is
+because their draws are θ-free. A mark law that reads a parameter — a
+source's, or a station's deposit-time `remark` — is
 refused with an `ArgumentError`: its own derivative would add a term to
 every estimator, and that term is not implemented. A service law that reads
 station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is refused too:
 pathwise branching is not guaranteed unbiased when event reordering changes
-an occupancy-dependent law — use the score estimator for those models.
+an occupancy-dependent law — use the score estimator for those models. A
+model containing a round station ([`Rounds`](@ref)) or a
+[`ShortestQueue`](@ref) route is refused in v1 for the same reordering
+reason — a reordered occupancy flips the routing decision discontinuously —
+and score gradients over their records remain valid (for round stations, θ
+in the arrival, mark, or remark laws feeding them; a `ShortestQueue`
+decision bears no likelihood at all).
 
 A [`populate!`](@ref) population follows the same rules: a θ-reading
 initial mark law is refused like a source's, and because a branchable world
@@ -132,6 +186,8 @@ res = ClockGradients.branching_gradient(
 ```
 """
 function branch_world(m::QueueGSMP, θ::AbstractVector; seed::Integer, method=NextReactionMethod())
+    _assert_no_rounds(m)
+    _assert_no_shortest_queue(m)
     _assert_thetafree_marks(m)
     _assert_stateless_service(m)
     rng = Xoshiro(seed)

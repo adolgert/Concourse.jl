@@ -18,6 +18,23 @@ time_average
 number_in_system
 ```
 
+## Auxiliary draws
+
+Every draw that is not a clock — marks, probabilistic routing, SIRO's
+pick, a round policy's randomness — flows through one conduit, the draw
+source (amendment A4). Live sources record every value into the firing's
+draw list; replay sources answer from the record and never touch a random
+number generator. A custom [`RoundPolicy`](@ref) is the one place user
+code receives a draw source: draw through [`Concourse.draw!`](@ref) and
+the policy replays for free.
+
+```@docs
+Concourse.DrawSource
+Concourse.livedraws
+Concourse.replaydraws
+Concourse.draw!
+```
+
 ## Runtime errors
 
 A model compiled with `allow_blocking_cycles = true` (see

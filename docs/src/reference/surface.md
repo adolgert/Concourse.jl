@@ -51,6 +51,7 @@ Always
 ByMark
 Probabilistic
 RoundRobin
+ShortestQueue
 ```
 
 ## Unblock policies
@@ -67,4 +68,34 @@ through the semantics.
 
 ```@docs
 Batching
+```
+
+## Round service
+
+A round configuration is a value passed to [`station!`](@ref); the
+[round service manual page](../manual/rounds.md) walks through the
+lifecycle, the policy purity contract, and the estimator position.
+
+```@docs
+Rounds
+RoundPolicy
+plan_round
+RoundView
+RoundJob
+RoundPlan
+```
+
+### Shipped round policies
+
+The stylized batching rules of Dai et al. (arXiv:2504.07347) and the
+flow-control algorithms of Dong & Cao (arXiv:2604.11001).
+
+```@docs
+FasterTransformerRule
+VanillaVLLM
+Orca
+Sarathi
+ClassPriority
+ClassBudgets
+FlowControl
 ```

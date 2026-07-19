@@ -47,7 +47,8 @@ Pkg.add(url = "https://github.com/adolgert/Concourse.jl")
 
 ## Limitations
 
-Mark laws that read a parameter are refused under branching worlds
+Mark laws that read a parameter — a source's, a population's, or a
+station's deposit-time `remark` — are refused under branching worlds
 (`branch_world` raises an `ArgumentError`): a θ-dependent mark law would
 add a derivative term of its own to every estimator, and that term is not
 implemented. The
@@ -78,6 +79,27 @@ insensitive to the winner's identity — documented, not certified. The
 score estimator remains valid on racing records. The
 [racing and cancellation section](https://computingkitchen.com/Concourse.jl/dev/queues/richer_stations/#Racing-and-cancellation)
 covers the two cancellation policies and their exact trigger semantics.
+
+Round-based token service (`Rounds`) — iteration-level batching and
+memory-occupancy dynamics, the LLM-serving regime, with per-job token
+counters and a policy hook at every round boundary — carries the family's
+caveats in their sharpest form: `branch_world` refuses round stations in
+v1, and a parameter inside a `Dirac` round duration (the common
+deterministic staircase) has *no score channel* — a point mass bears no
+density — while pathwise IPA is not certified, because allocations move by
+whole tokens. Score gradients remain valid for parameters in the arrival,
+mark, or remark laws feeding a round station. The
+[round service page](https://computingkitchen.com/Concourse.jl/dev/manual/rounds/)
+covers the lifecycle, the policy purity contract, and the shipped
+Dai et al. and Dong & Cao policies.
+
+Join-the-shortest-queue routing (`ShortestQueue`) is deterministic and
+draws nothing, so replay reproduces every decision from state; the cost is
+again smoothness: pathwise IPA is not certified (a perturbation that
+reorders events can flip a routing decision), and `branch_world` refuses
+it in v1, while score gradients over records remain valid. The
+[shortest-queue section](https://computingkitchen.com/Concourse.jl/dev/queues/networks/#Joining-the-shortest-queue)
+covers the kernel and `stability`'s equal-split approximation.
 
 Cyclic blocking topologies run under `compile`'s
 `allow_blocking_cycles = true` (by default a cycle of finite `:block`

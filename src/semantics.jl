@@ -11,15 +11,16 @@ const ClockDelta = Tuple{Symbol,ClockKey}   # (:enable | :disable | :reenable, k
 # claim F2 is that adding a family (as :patience was added) changes nothing
 # else: clock lifecycle is DERIVED from family_station_keys! at the stations
 # a firing touched, never hand-emitted at the state-transition sites.
-const CLOCK_FAMILIES = (:arrival, :service, :patience)
+const CLOCK_FAMILIES = (:arrival, :service, :patience, :round)
 
 """
     enabled(m::QueueGSMP, st::QueueState) -> Vector{ClockKey}
 
 The keys of every clock enabled in state `st`, derived from the state
 alone: one `:arrival` clock per source, one `:service` clock per job in
-service, and one `:patience` clock per waiting job at a station with a
-patience law. One of the five contract functions. The interpreter's debug
+service, one `:patience` clock per waiting job at a station with a
+patience law, and one `:round` clock per round station with a committed
+plan. One of the five contract functions. The interpreter's debug
 oracle recomputes this set after every firing and compares it against the
 sampler.
 """
@@ -37,9 +38,21 @@ function family_station_keys!(ks, ::Val{:arrival}, m::QueueGSMP, st::QueueState,
 end
 
 function family_station_keys!(ks, ::Val{:service}, m::QueueGSMP, st::QueueState, s::Int)
+    # A round station's active jobs live in srv but hold no per-job clocks;
+    # the one :round clock is the server (I2).
+    m.stations[s].rounds === nothing || return nothing
     for j in st.srv[s]
         push!(ks, (:service, Int32(s), j))
     end
+    return nothing
+end
+
+# Round service: one station-level clock per running round, enabled exactly
+# while a committed plan sits in the state's roundplan slot (I2 — membership
+# is derived from the plan slot, never hand-emitted).
+function family_station_keys!(ks, ::Val{:round}, m::QueueGSMP, st::QueueState, s::Int)
+    m.stations[s].rounds === nothing && return nothing
+    st.roundplan[s] === nothing || push!(ks, (:round, Int32(s), JobId(0)))
     return nothing
 end
 
@@ -152,11 +165,23 @@ function family_law(::Val{:patience}, m, θ, key, st)
     )
 end
 
+function family_law(::Val{:round}, m, θ, key, st)
+    # The duration law reads the committed plan's aggregates as pseudo-marks
+    # (tokens, requests, per-phase sums), frozen at enabling like any mark;
+    # check C13 keeps it off job marks and live state.
+    plan = st.roundplan[key[2]]::RoundPlan
+    r = m.stations[key[2]].rounds::Rounds
+    return builddist(r.duration, m.params, θ, plan.aggregates, st.te[key], NOSTATE)
+end
+
 # What a disabled-without-firing clock remembers, per family. The generic
-# disable pass banks the age for :resume and forgets it for :fresh.
+# disable pass banks the age for :resume and forgets it for :fresh. A round
+# clock never disables without firing — only its own firing clears the plan
+# slot — so :fresh is vacuous there.
 family_memory(::Val{:arrival}, m, key) = :fresh
 family_memory(::Val{:service}, m, key) = m.stations[key[2]].discipline.memory
 family_memory(::Val{:patience}, m, key) = :fresh
+family_memory(::Val{:round}, m, key) = :fresh
 
 # ---------------------------------------------------------------------------
 # fire
@@ -332,6 +357,34 @@ function family_fire!(::Val{:patience}, m, st, key, t, draws, wl, touched)
     return push!(wl, Int(s))
 end
 
+# A round completion: credit the plan's allocations against the work
+# counters, route every active job whose work is exhausted (holdable =
+# false, the batch-member rule — the round's firing IS the server, so
+# nothing is left to hold a departure that meets a full :block buffer),
+# clear the plan, and push the station so settle re-plans at the same t —
+# back-to-back rounds chain with no gap. Work-conservation is the policy's
+# business, not the engine's.
+function family_fire!(::Val{:round}, m, st, key, t, draws, wl, touched)
+    _, s, _ = key
+    plan = st.roundplan[Int(s)]::RoundPlan
+    for (j, av) in plan.alloc
+        w = get(st.work, j, nothing)
+        w === nothing && continue          # the job was canceled mid-round
+        for p in eachindex(av)
+            w[p] -= av[p]
+        end
+    end
+    for j in copy(st.srv[s])
+        all(==(0), st.work[j]) || continue
+        _remove!(st.srv[s], j)
+        delete!(st.work, j)
+        d = routejob!(m, st, Int(s), j, draws)
+        deposit!(m, st, Int(s), d, j, wl, touched, draws; holdable=false)
+    end
+    st.roundplan[Int(s)] = nothing
+    return push!(wl, Int(s))
+end
+
 function _remove!(v::Vector, x)
     i = findfirst(==(x), v)
     i === nothing && error("$x not present")
@@ -364,14 +417,73 @@ function routejob!(m::QueueGSMP, st::QueueState, origin::Int, j::JobId, draws::D
         c = st.cursor[origin]
         st.cursor[origin] = mod1(c + 1, length(k.dests))
         Int(k.dests[c])
+    elseif k.kind == :shortestqueue
+        # Deterministic state-reading routing (capability 8): the smallest
+        # occupancy wins, ties to the lowest station index. A4 admits it
+        # because a deterministic function of state bears no likelihood —
+        # nothing is drawn, nothing is recorded, and replay reproduces the
+        # decision from the folded state (I1, I4).
+        best = Int(k.dests[1])
+        bestocc = _jsq_occupancy(m, st, best, k.by)
+        for i in 2:length(k.dests)
+            d = Int(k.dests[i])
+            occ = _jsq_occupancy(m, st, d, k.by)
+            if occ < bestocc || (occ == bestocc && d < best)
+                best, bestocc = d, occ
+            end
+        end
+        best
     else
         error("unknown kernel kind $(k.kind)")
     end
 end
 
+# ShortestQueue's occupancy notions. :requests is the total number of jobs
+# at the station — waiting, in service, and held blocked (the number_at
+# convention). :tokens is the total remaining work at a round station:
+# active jobs' remaining counters plus waiting jobs' full profiles (the
+# counters they would get at admission) — compile guarantees every
+# destination is a round station whose work marks the waiting jobs carry.
+function _jsq_occupancy(m::QueueGSMP, st::QueueState, d::Int, by::Symbol)
+    by == :requests && return length(st.buf[d]) + length(st.srv[d]) + length(st.hold[d])
+    r = m.stations[d].rounds::Rounds
+    tot = 0
+    for j in st.srv[d]
+        tot += sum(st.work[j])
+    end
+    for j in st.buf[d]
+        marks = st.jobs[j]
+        for mk in r.work
+            tot += Int(getfield(marks, mk))
+        end
+    end
+    return tot
+end
+
 # ---------------------------------------------------------------------------
 # deposit and the settle cascade — pure state movement; clock lifecycle is
 # derived afterwards from the membership these moves imply.
+
+# Mark redraw on deposit (capability 7): a station's remark laws are drawn
+# through the firing's DrawSource when a job arrives from OUTSIDE — filing
+# into the buffer, or turning back blocked — and never on moves within the
+# station (an eviction's return, an unblocked transfer's admission). Every
+# law is evaluated against the job's PRE-redraw marks, then the drawn values
+# merge over them — same names replace, new names extend — so an :ordered
+# insert and the service law see the new values. A dropped job redraws
+# nothing: no draw is consumed for a job that never files.
+function remark!(m::QueueGSMP, st::QueueState, d::Int, j::JobId, draws::DrawSource)
+    ml = m.stations[d].remark
+    ml === nothing && return nothing
+    old = st.jobs[j]
+    drawn = NamedTuple()
+    for (name, law) in ml.laws
+        v = drawmark!(draws, name, law, old, st.time)
+        drawn = merge(drawn, NamedTuple{(name,)}((v,)))
+    end
+    st.jobs[j] = merge(old, drawn)
+    return nothing
+end
 
 # `holdable` says whether a job that meets a full :block destination may be
 # held in the origin's server. Every ordinary deposit is holdable; a batch
@@ -475,6 +587,11 @@ function deposit!(
             # A source has no server to hold a blocked job, so an external
             # arrival to a full :block station is lost, not blocked.
             if holdable && stn.overflow == :block && m.stations[origin].kind == :station
+                # The redraw belongs to the deposit, not to the eventual
+                # unblock re-file — that one happens in some later firing's
+                # settle and replays no draw — so a blocked transfer redraws
+                # now, while this firing's draw source is in hand.
+                remark!(m, st, d, j, draws)
                 push!(st.hold[origin], j)
                 push!(st.blocked[d], (Int32(origin), j))
                 push!(touched, origin)
@@ -488,6 +605,7 @@ function deposit!(
                 g != JobId(0) && _prune_member!(st, g, j)
             end
         else
+            remark!(m, st, d, j, draws)
             file_into_buffer!(m, st, d, j)
             push!(wl, d)
         end
@@ -591,6 +709,25 @@ function cancel_job!(m::QueueGSMP, st::QueueState, x::JobId, wl::Vector{Int}, to
         i = findfirst(==(x), st.srv[s])
         if i !== nothing
             deleteat!(st.srv[s], i)
+            # A canceled sibling active in a round: its work counters and its
+            # entry in the running plan go with it (the slot is REPLACED —
+            # committed plans are immutable), and the round runs on with its
+            # aggregates frozen, like a canceled batch member.
+            if m.stations[s].rounds !== nothing
+                delete!(st.work, x)
+                plan = st.roundplan[s]
+                if plan !== nothing
+                    ai = findfirst(p -> p.first == x, plan.alloc)
+                    if ai !== nothing
+                        st.roundplan[s] = RoundPlan(
+                            plan.admit,
+                            plan.evict,
+                            plan.alloc[setdiff(eachindex(plan.alloc), ai)],
+                            plan.aggregates,
+                        )
+                    end
+                end
+            end
             push!(wl, s)
             push!(touched, s)
             found = true
@@ -778,17 +915,24 @@ function settle!(
         end
     end
 
-    # 2. Dispatch: fill free slots in discipline order. A batching station
-    # instead gathers waiting jobs into a synthetic batch job: once at least
-    # `min` jobs wait, a free server takes up to `max` of them in discipline
-    # order (draw-free under FCFS, the only discipline C6 admits), and one
-    # fresh job id carrying the mark `batchsize` enters service for them.
-    # Members leave the buffer but stay in st.jobs, keyed through
-    # st.batchmembers — like stashed join siblings, they are still in the
-    # system. With fewer than `min` waiting, the server idles; no clock is
-    # needed for the forming batch because arrivals re-run settle.
+    # 2. Dispatch: fill free slots in discipline order. A round station
+    # instead plans: with no round running, the policy examines the view and
+    # a committed plan moves its admissions and evictions and stores the
+    # frozen allocation, whose derived delta enables the :round clock. With
+    # a round already running, deposits simply queue — the next boundary is
+    # the running clock's firing. A batching station gathers waiting jobs
+    # into a synthetic batch job: once at least `min` jobs wait, a free
+    # server takes up to `max` of them in discipline order (draw-free under
+    # FCFS, the only discipline C6 admits), and one fresh job id carrying
+    # the mark `batchsize` enters service for them. Members leave the buffer
+    # but stay in st.jobs, keyed through st.batchmembers — like stashed join
+    # siblings, they are still in the system. With fewer than `min` waiting,
+    # the server idles; no clock is needed for the forming batch because
+    # arrivals re-run settle.
     b = stn.batching
-    if b === nothing
+    if stn.rounds !== nothing
+        st.roundplan[q] === nothing && _settle_round!(m, st, q, draws)
+    elseif b === nothing
         while _freeslots(m, st, q) > 0
             j = selectjob!(m, st, q, draws)
             j === nothing && break
@@ -824,6 +968,116 @@ function settle!(
 end
 
 _pick_unblock!(::FCFSUnblock, queue::Vector{Tuple{Int32,JobId}}) = popfirst!(queue)
+
+# ---------------------------------------------------------------------------
+# Round planning (capability 6). A round station with no running plan asks
+# its policy for one, through a read-only view; `nothing` idles the station
+# until the next deposit re-runs settle, and a plan commits its state
+# surgery here — evictions, admissions, allocation validation, frozen
+# aggregates — so the derived-delta pass enables the :round clock from
+# membership alone (I2). Policy randomness flows through the firing's draw
+# source (I1); the policy itself must be a pure function of (view, draws).
+
+function _settle_round!(m::QueueGSMP, st::QueueState, q::Int, draws::DrawSource)
+    r = m.stations[q].rounds::Rounds
+    plan = plan_round(r.policy, _round_view(m, st, q), draws)
+    plan === nothing && return nothing
+    _commit_round!(m, st, q, plan::RoundPlan, r)
+    return nothing
+end
+
+function _round_view(m::QueueGSMP, st::QueueState, q::Int)
+    stn = m.stations[q]
+    r = stn.rounds::Rounds
+    waiting = RoundJob[
+        RoundJob(j, st.jobs[j], _work_profile(stn, st.jobs[j], j)) for j in st.buf[q]
+    ]
+    active = RoundJob[RoundJob(j, st.jobs[j], copy(st.work[j])) for j in st.srv[q]]
+    return RoundView(r.work, waiting, active)
+end
+
+# The admission-time snapshot of a job's work profile: each work mark,
+# runtime-checked to be an integer >= 0 (check C12's runtime half).
+function _work_profile(stn::CompiledStation, marks::NamedTuple, j::JobId)
+    r = stn.rounds::Rounds
+    prof = Vector{Int}(undef, length(r.work))
+    for (p, mk) in enumerate(r.work)
+        v = getfield(marks, mk)
+        (isinteger(v) && v >= 0) || error(
+            "round station $(stn.name) cannot admit job $j: work mark $mk = $v " *
+            "is not a nonnegative integer",
+        )
+        prof[p] = Int(v)
+    end
+    return prof
+end
+
+function _commit_round!(m::QueueGSMP, st::QueueState, q::Int, plan::RoundPlan, r::Rounds)
+    stn = m.stations[q]
+    # Evictions first: active → waiting with the work counters RESET (Dong's
+    # refresh semantics) — the counter entry is simply deleted, and a later
+    # re-admission re-snapshots the full profile from the marks. The evicted
+    # job files at the back of the FCFS line and, by membership, gets a
+    # fresh patience clock if the station reneges.
+    for j in plan.evict
+        j in st.srv[q] || error("round plan at $(stn.name) evicts job $j, which is not active")
+        _remove!(st.srv[q], j)
+        delete!(st.work, j)
+        file_into_buffer!(m, st, q, j)
+    end
+    # Admissions: waiting → active in the plan's order, snapshotting the
+    # integer work counters.
+    for j in plan.admit
+        j in st.buf[q] || error("round plan at $(stn.name) admits job $j, which is not waiting")
+        _remove!(st.buf[q], j)
+        st.work[j] = _work_profile(stn, st.jobs[j], j)
+        push!(st.srv[q], j)
+    end
+    # Allocations, engine-enforced: every allocation names an active job at
+    # most once, covers every phase, and stays within 0 <= alloc <= remaining
+    # per phase. The aggregates — token load b, batch size k, per-phase
+    # sums — freeze here as the pseudo-marks the duration law reads.
+    np = length(r.work)
+    tokens = 0
+    requests = 0
+    phasesum = zeros(Int, np)
+    seen = Set{JobId}()
+    for (j, av) in plan.alloc
+        j in st.srv[q] ||
+            error("round plan at $(stn.name) allocates to job $j, which is not active")
+        j in seen && error("round plan at $(stn.name) allocates to job $j twice")
+        push!(seen, j)
+        length(av) == np || error(
+            "round plan at $(stn.name) allocates $(length(av)) phases to job $j; " *
+            "the station has $np work phases",
+        )
+        w = st.work[j]
+        pos = false
+        for p in 1:np
+            0 <= av[p] <= w[p] || error(
+                "round plan at $(stn.name) allocates $(av[p]) tokens to phase " *
+                "$(r.work[p]) of job $j, which has $(w[p]) remaining",
+            )
+            tokens += av[p]
+            phasesum[p] += av[p]
+            pos |= av[p] > 0
+        end
+        pos && (requests += 1)
+    end
+    ag = merge(
+        (tokens=Float64(tokens), requests=Float64(requests)),
+        NamedTuple{Tuple(r.work)}(Tuple(Float64.(phasesum))),
+    )
+    # Defensive copies: the committed plan must be immutable, and the policy
+    # keeps no handle into the state through vectors it returned.
+    st.roundplan[q] = RoundPlan(
+        copy(plan.admit),
+        copy(plan.evict),
+        Pair{JobId,Vector{Int}}[j => copy(v) for (j, v) in plan.alloc],
+        ag,
+    )
+    return nothing
+end
 
 # F9's claim is that FIFO and LIFO reach the same fixed point because
 # contention lives in UnblockPolicy, not in this order. The claim survives

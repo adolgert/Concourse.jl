@@ -95,6 +95,12 @@ The amendments, agreed in design discussion on July 17, 2026:
   changes, each surviving clock is re-declared with the fresh law
   conditioned on its accrued service effort, \code{te} fixed. (Added
   July 18, 2026; Section~\ref{sec:a5}.)
+\item[A6.] \emph{Round service: the plan is state, the round is one
+  clock, the policy is pure.} A station may serve in synchronous rounds
+  under a boundary policy; the committed round plan and the per-job work
+  counters live in \code{QueueState}, one derived \code{:round} clock per
+  station runs each round, and policy purity is a documented modeling
+  assumption. (Added July 19, 2026; Section~\ref{sec:a6}.)
 \end{description}
 
 One contract delta against ClockGradients.jl falls out of A1 and is proposed
@@ -441,6 +447,60 @@ an unqualified C5 elsewhere in this document keeps the
 \code{queue\_layers.tex} meaning.
 
 %==============================================================================
+\section{A6: synchronous round service}
+\label{sec:a6}
+
+Added July 19, 2026, with the round-based token service capability
+(iteration-level batching for LLM serving; Dai et al.\ arXiv:2504.07347
+and Dong \& Cao arXiv:2604.11001 are the target models). A1--A5 are
+unchanged by it. A round station serves in synchronous rounds: at each
+boundary a policy examines the waiting line and the active set, admits and
+evicts jobs, and allocates integer work units to the active ones; one
+station-level clock runs the round; at its firing the allocations are
+credited against per-job work counters, exhausted jobs route onward, and
+the next round is planned at the same instant. Three commitments define
+the amendment.
+
+\paragraph{The round plan is model state.} A1 applied again:
+\code{QueueState} gains \code{work} (per-job remaining integer work, one
+counter per declared phase, created at admission and deleted at
+departure) and \code{roundplan} (one \code{Union\{RoundPlan,Nothing\}}
+slot per station holding the running round's frozen admissions,
+evictions, per-job allocations, and aggregate pseudo-marks). Both are
+replay-owned exactly like \code{cursor}, \code{te}, and \code{bank}:
+\code{states\_equal} compares them field by field, and the record fold
+reproduces them, so the round machinery adds nothing to the record beyond
+the draws a policy explicitly consumes (A4).
+
+\paragraph{One clock per round, membership derived.} The \code{:round}
+family joins the A2 registry with key
+\code{(:round, station, 0)} and derived membership: the clock is enabled
+exactly while the station's \code{roundplan} slot is non-empty, so the
+derived-delta pass --- not the planner --- owns the clock lifecycle. The
+round clock \emph{is} the station's single server: active jobs hold no
+per-job clocks, the duration law reads only the committed plan's
+aggregate pseudo-marks (frozen at enabling, like every mark), and the
+firing credits the plan, routes the finished jobs, clears the slot, and
+re-plans immediately at the same time, so back-to-back rounds chain with
+no gap. A station with no plan idles clock-free, and the first deposit
+after an idle period re-anchors the round grid at that deposit's time ---
+a documented modeling convention, invisible in the papers' loaded
+regimes.
+
+\paragraph{Policy purity is a modeling assumption.} The policy hook
+\code{plan\_round(policy, view, draws)} is the first user code inside the
+fire path. Its contract is A4 extended to user code: the policy is a pure
+function of \code{(view, draws)} --- all randomness through the recorded
+draw source, no clocks, no wall time, no $\theta$, no state beyond the
+read-only view. Like an \code{Opaque} law's declared reads (A3), purity
+cannot be compile-checked for arbitrary Julia code; it is an assumption
+the model owner takes on. The view is constructed as a barrier (copies
+and values, never \code{QueueState}) so that honest code cannot violate
+the contract by accident, and replay equality (F4) plus the debug
+membership oracle are the enforcement that exists --- the test suite
+demonstrates both catching a deliberately impure policy.
+
+%==============================================================================
 \section{The amended contract surface}
 \label{sec:contract}
 
@@ -514,6 +574,36 @@ Erlang-A for reneging).
   closed form, and against a Bogliolo-style clock-and-speed-matrix
   reference implementation on a small case.
 \end{description}
+
+\paragraph{Compile-check registry (continued).} The registry remark of
+Section~\ref{sec:a5} records that Concourse's compile-time check numbering
+diverged from \code{queue\_layers.tex} at C5. The July 2026 capabilities
+extend the code's registry; this charter is the normative record of the
+numbering:
+
+\begin{description}
+\item[C11 (remark scope).] Deposit-time mark-redraw (\code{remark}) laws
+  obey source-mark-law scope: no station state, and reads only of the
+  marks the job carries \emph{before} the redraw. Their draws ride the
+  depositing firing's draw list (A4); a remark-only mark is readable at
+  the remark station and downstream, never upstream.
+\item[C12 (round station shape).] A round station composes with exactly
+  the plain FCFS shape: non-preemptive \code{:back}-insert FCFS, no
+  \code{batching} (the policy owns batch formation), \code{servers = 1}
+  (the round clock is the server, A6), no \code{service} law (the
+  duration lives in the \code{Rounds} config), and \code{work} marks
+  produced upstream --- integer-valued and nonnegative at admission,
+  checked at runtime.
+\item[C13 (round duration-law scope).] The round duration law reads only
+  parameters, the enabling time, and the committed plan's aggregate
+  pseudo-marks --- never job marks and never live state.
+\end{description}
+
+Every message is pinned verbatim by the test suite
+(\code{test/test\_remark.jl}, \code{test/test\_rounds.jl}). The
+\code{ShortestQueue} destination checks (destinations must exist; under
+\code{by = :tokens} every destination must be a round station) are plain
+\code{ArgumentError}s and deliberately carry no C~number.
 
 %==============================================================================
 \section{Queued middle-layer questions}

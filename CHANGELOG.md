@@ -10,6 +10,130 @@ and this project adheres to
 
 ### Added
 
+- Documentation wrap-up for the round-service capabilities: a
+  "Round-based token service" manual page (`docs/src/manual/rounds.md` —
+  the round lifecycle, the C12 station shape, the policy purity
+  contract, the seven shipped policies with their paper citations,
+  eviction/cancellation/blocking semantics, the M/D/1 degenerate
+  example, and the behavioral notes from the paper reproductions);
+  round-service and draw-source sections on the reference pages;
+  estimator-validity rows for round service (the θ-placement cases,
+  including the no-score-channel `Dirac`-duration gap) and
+  `ShortestQueue`; amendment A6 (round-plan state, one clock per round,
+  policy purity) and the C11–C13 compile-check registry in
+  `notes/model_definition.tex`; README caveat paragraphs for round
+  service and shortest-queue routing.
+
+- Deterministic state-reading routing: `route!(net, from,
+  ShortestQueue(dests...; by = :requests))` sends each departing job to
+  the destination with the smallest occupancy, deterministically — ties
+  to the lowest station index. `by = :requests` (the default) counts the
+  jobs at the destination (waiting + in service + held blocked);
+  `by = :tokens` sums the remaining work (active jobs' counters plus
+  waiting jobs' full profiles) and requires every destination to be a
+  round station, which compile checks. Amendment A4 admits the kernel
+  because a deterministic function of state bears no likelihood: nothing
+  is drawn, nothing is recorded, and replay reproduces every decision
+  from the folded state (I1, I4). Randomized load balancing (power-of-d)
+  is likelihood-bearing and stays out of scope.
+- Estimator scope for `ShortestQueue` (I5): score gradients over records
+  remain valid (the decision contributes no likelihood factor); pathwise
+  IPA is not certified, because a perturbation that reorders events can
+  flip a routing decision discontinuously. `branch_world` refuses models
+  containing `ShortestQueue` in v1, the state-reading-law refusal
+  precedent.
+- `stability` treats `ShortestQueue` as an equal split across its
+  destinations — a documented approximation, exact under symmetry.
+- JSQ tests: tie-break-to-lowest-index and nothing-drawn on a crafted
+  deterministic trace; same-seed record identity and replay equality; the
+  symmetric M/M/2 JSQ mean-occupancy oracle against a truncated CTMC
+  solved in the test (with the truncation mass bounded); Dai Proposition
+  3's two-server boundary under `ShortestQueue(by = :tokens)` round
+  stations (stable at 0.9λ*, linear token growth at 1.1λ*); the paired
+  JSQ-beats-Bernoulli sojourn comparison; the equal-split stability
+  report; the check messages verbatim; the `branch_world` refusal. The
+  two-server `jsq_pair` builder joins `testmodels.jl`.
+- Docs: a "Joining the shortest queue" section on the networks tutorial
+  page (the A4 argument, both occupancy notions, the estimator caveat,
+  the stability approximation), `ShortestQueue` on the surface reference
+  page.
+
+- Round-based token service: `station!(...; rounds = Rounds(policy,
+  duration, work))` serves a station in synchronous rounds. At each
+  boundary the `RoundPolicy` plans the round through a read-only
+  `RoundView` — admissions (waiting → active), evictions (active →
+  waiting with the work counters RESET, Dong's refresh semantics), and
+  per-active-job integer token allocations, engine-enforced within
+  `0 ≤ alloc ≤ remaining` per phase — and one station-level `:round`
+  clock runs it under the `duration` law, which reads the plan's frozen
+  aggregates (`tokens`, `requests`, per-phase sums) as pseudo-marks. At
+  the firing allocations are credited, exhausted jobs route onward
+  (dropped at a full `:block` destination, the batch-member rule), and
+  the next round is planned at the same instant, so rounds chain with no
+  gap. Per-job work counters and the committed plan live in `QueueState`
+  (`work`, `roundplan`), replay-owned; policy randomness flows through
+  the firing's draw source, so replay reproduces every plan (I1/I4).
+  Waiting jobs keep patience clocks; an evicted job re-files with a
+  fresh one. `populate!` may seed round stations; a canceled sibling
+  active in a round leaves the plan's aggregates frozen.
+- Shipped round policies: Dai et al.'s four batch composition rules
+  (`FasterTransformerRule`, `VanillaVLLM`, `Orca`, `Sarathi`, each with
+  a token `budget` and optional batch-size cap `kmax`), the
+  `ClassPriority` wrapper for strict class priority over any of them,
+  and Dong & Cao's `ClassBudgets` (Algorithm 1: per-class activation
+  budgets, FIFO, no memory check) and `FlowControl` (Algorithm 2: drawn
+  global activation budget, KV accounting `U = Σ(l + generated + 1)`,
+  LIFO eviction with full progress reset on overflow).
+- Compile checks C12 (round-station shape: non-preemptive FCFS, no
+  `batching`, `servers = 1`, no `service` law, `work` marks produced
+  upstream — plus the runtime integer-`≥ 0` check at admission) and C13
+  (the duration law reads only the plan's aggregates, never job marks
+  or station state).
+- Expression algebra: `ceil` and `floor` on `ScalarExpr`, so Dai's
+  staircase `c + a * ceil(Mark(:tokens) / b0)` is a plain duration
+  expression; both are flat almost everywhere, so θ inside them
+  contributes no pathwise derivative — exact, not an approximation.
+- Estimator scope: θ in arrival, mark, or remark laws feeding a round
+  station keeps a valid score over records; a `Dirac` round duration has
+  no score channel and pathwise IPA is not certified. `branch_world`
+  refuses models containing round stations in v1.
+- Round tests: the degenerate M/D/1 (Sarathi budget 1 on unit work)
+  against Pollaczek–Khinchine and record-level against its plain FCFS
+  twin at the same seed; replay equality and debug membership on
+  admission/eviction traffic, with FlowControl's LIFO reset visible in
+  the record; an impure test policy caught by the replay harness; the
+  C12/C13 messages verbatim; fractional work marks erroring at
+  admission; chained rounds at sustained overload staying inside the
+  cascade fuel bound.
+
+- Mark redraw on deposit: `station!(...; remark = (name = Law(...), ...))`
+  declares laws (a `NamedTuple` or a `MarkLaw`) drawn when a job is
+  deposited into the station from outside — filing into the buffer, or
+  turning back blocked — and merged over the job's marks (same names
+  replace, new names extend), before the discipline or the service law
+  reads them. Every remark law is evaluated against the job's pre-redraw
+  marks, then the drawn values merge, so laws reading each other's names
+  swap. Re-files within the station (a preempted job's return, an
+  unblocked transfer's admission) redraw nothing. Remark draws flow
+  through the depositing firing's draw source, land in the record like
+  any mark draw, and replay exactly.
+- Compile check C11: remark laws obey source-mark-law scope — no station
+  state. The mark census turns placement-aware for remark marks: a
+  remark-only mark is readable at the remark station and downstream of
+  it, never upstream, and a remark law reads only marks on the job
+  before the redraw. `branch_world` refuses θ-reading remark laws
+  exactly as it refuses θ-reading source mark laws.
+- Remark tests: the two-hop tandem whose hops match their own M/M/1
+  occupancies (a mark leaking across hops would land on the wrong
+  moments), the pre-redraw swap convention with the draws visible in the
+  record, replay equality with loud truncation of a remark draw, the
+  once-per-deposit count under blocking and unblocking, the branching
+  refusal, and the C11/census messages verbatim.
+- Docs: a "Redrawing marks en route" section on the marks tutorial page,
+  the `station!` remark keyword, an estimator-validity note (remark
+  draws are ordinary recorded mark draws — no new row), and the README
+  branching limitation extended to remark laws.
+
 - Cyclic blocking: `compile(net; allow_blocking_cycles = true)` skips the
   blocking-cycle check (C3) and lets `:block` cycles run; the default is
   byte-for-byte unchanged. When a cycle of full buffers actually wedges —
