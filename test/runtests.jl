@@ -28,6 +28,7 @@ for file in [
     "test_bcmp.jl",
     "test_statedep.jl",
     "test_batch.jl",
+    "test_cancel.jl",
     "test_quality.jl",
 ]
     path = joinpath(@__DIR__, file)

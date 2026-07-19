@@ -10,6 +10,36 @@ and this project adheres to
 
 ### Added
 
+- Sibling cancellation: `join!(net, name; parts, need, cancel)` races a
+  fork's siblings as (n, k) redundancy. Under `cancel = :on_completion`
+  the `need`-th sibling to reach the join merges the group and cancels
+  the rest wherever they sit — buffered, in service, or held blocked —
+  freeing servers and waiting-room slots for the dispatch cascade. Under
+  `cancel = :on_start` the `need`-th sibling to *enter service* cancels
+  still-buffered siblings only; in-service survivors run to completion
+  and are silently absorbed at the join, visible in the record. Nested
+  forks cancel recursively, and a nested join's merged job inherits its
+  fork parent's group so races compose. Cancellation is deterministic
+  given the state — nothing new is recorded and replay equality holds.
+- Compile checks C7–C9 for race coherence: `need < parts` requires a
+  cancellation policy (C7, at `join!`), a fork's siblings reach at most
+  one canceling join (C8), and stations on tracked branches receive
+  sibling traffic only, `renege_to` edges included (C9).
+- Cancellation tests: the Joshi (n, 1) Pollaczek–Khinchine oracle for
+  shifted-exponential and hyperexponential service with the server-cost
+  identity E[C] = n·E[X₍₁:ₙ₎], the exponential (3, 1) pair of oracles —
+  `:on_completion` is M/M/1 at the pooled rate while `:on_start` is
+  exactly M/M/n, with a separation test — (4, 2) census conservation,
+  blocked-sibling cancellation with cascade refills, nested-fork
+  recursion and no-residue sweeps, replay/debug membership, and C7–C9
+  messages verbatim.
+- Manual: a "Racing and cancellation" section on the fork–join tutorial
+  page with both cancellation policies and the worked Joshi (n, 1)
+  oracle; the estimator-validity table gains a sibling-cancellation row
+  (score valid, IPA only for identity-insensitive statistics, SPA the
+  road for latency derivatives), with a matching caveat in the gradient
+  manual and the README.
+
 - Batch service: `station!(...; batching = Batching(min, max))` gathers
   waiting jobs into a synthetic batch job served by one clock. The batch
   carries the mark `batchsize`, frozen at enabling, so existing

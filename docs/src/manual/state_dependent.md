@@ -184,6 +184,7 @@ model features; later capabilities will extend it.
 | ``\theta``-dependent mark laws | not guaranteed | not guaranteed | not guaranteed |
 | State-dependent service laws | not guaranteed | **valid** | valid |
 | [Batch service](batching.md) (`Batching`) | not guaranteed | **valid** | valid |
+| [Sibling cancellation](../queues/richer_stations.md#Racing-and-cancellation) (`join!` with `cancel`) | not guaranteed | **valid** | valid |
 
 - **``\theta``-dependent mark laws** (the existing
   [branching](branching.md) restriction): a mark law that reads a
@@ -221,6 +222,23 @@ model features; later capabilities will extend it.
   realized order, so the recomposition a swap causes sits inside the
   conditioning, as with a law change. Batch clocks are never re-declared,
   so these records do not trip `spa_gradient`'s multi-segment refusal.
+- **Sibling cancellation, score**: valid. Cancellation consumes no draws
+  and changes no law mid-flight: canceled clocks simply leave the enabled
+  set at a firing the record pins down, so each inter-event interval's
+  likelihood — survival terms of the canceled clocks included — is exactly
+  what the record says it is.
+- **Sibling cancellation, pathwise IPA**: not guaranteed unbiased — this
+  is the canonical order discontinuity. Which sibling wins a race *is* the
+  event order: a perturbation that swaps two finish times swaps the
+  winner's identity, and different work is canceled. IPA is valid only for
+  statistics insensitive to that identity switch; as with batching, the
+  fragility is documented, not enforced — `branch_world` does not refuse
+  racing models, and the insensitivity claim is the user's to make.
+- **Sibling cancellation, SPA**: valid — a swap's correction conditions on
+  the realized order, so the identity switch and the work it cancels sit
+  inside the conditioning; SPA is the road to latency derivatives for
+  racing models. Canceled clocks are removed, never re-declared, so these
+  records do not trip `spa_gradient`'s multi-segment refusal.
 
 See [Gradient estimation](gradients.md) for the estimators themselves and
 for the processor-sharing experiment that first demonstrated the IPA

@@ -277,6 +277,28 @@ agrees with finite differences. **On processor-sharing records, the valid
 estimators today are score and branching.** SPA refuses the records; IPA
 returns a biased answer if you force it, so do not.
 
+## A second caveat: IPA is blind to who wins a race
+
+Sibling cancellation —
+[racing forks](../queues/richer_stations.md#Racing-and-cancellation),
+`join!` with `need < parts` and a `cancel` policy — is the purest form of
+the order-dependence IPA cannot see. Which sibling wins the race *is* the
+event order: perturb ``\theta`` enough to swap two finish times and a
+different sibling merges, different work is canceled, and any statistic
+that notices the winner's identity — per-branch throughput, canceled-work
+totals, a latency read off which replica answered — jumps by a finite
+amount. Unlike processor sharing, the records themselves are harmless:
+cancellation re-declares no clocks, so IPA on a racing record is not
+*structurally* biased, and it remains fine for statistics genuinely
+insensitive to the identity switch. That insensitivity is documented, not
+certified — `branch_world` does not refuse racing models, and the claim
+is yours to make per statistic. The score estimator is valid on racing
+records; SPA's swap correction is exactly shaped for the winner-identity
+jump, and racing records do not trip `spa_gradient`'s multi-segment
+refusal (segment-free, unlike PS). The
+[estimator-validity table](state_dependent.md#Estimator-validity) records
+the row.
+
 ## Which estimator when
 
 | Estimator | Needs | Variance | Order changes | PS records |

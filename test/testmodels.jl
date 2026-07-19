@@ -126,6 +126,30 @@ function batch_mmk1(; min, max=min, service=Law(:Exponential; scale=inv(Param(:m
     return compile(net)
 end
 
+# (n, k) redundancy race (capability 3): source → fork into n single-server
+# FCFS branch stations :s1..:sn → join(parts = n, need = k, cancel) → sink.
+# One service law shared by every branch; the exponential default is the
+# redundancy oracle, and an Opaque (shifted exponential, hyperexponential)
+# reaches the Joshi P-K oracle — the sampler only needs the distribution to
+# answer logccdf/invlogccdf.
+function nk_race(n, k; service=Law(:Exponential; scale=inv(Param(:mu))), cancel=:on_completion)
+    net = QueueNetwork(; param_names=(:lambda, :mu))
+    source!(net, :arrive; interarrival=Law(:Exponential; scale=inv(Param(:lambda))))
+    branches = [Symbol(:s, i) for i in 1:n]
+    fork!(net, :split; branches)
+    for b in branches
+        station!(net, b; service)
+    end
+    join!(net, :merge; parts=n, need=k, cancel)
+    sink!(net, :done)
+    route!(net, :arrive, Always(:split))
+    for b in branches
+        route!(net, b, Always(:merge))
+    end
+    route!(net, :merge, Always(:done))
+    return compile(net)
+end
+
 # CONCOURSE_TEST_QUICK=1 shrinks replication counts for fast local iteration.
 const QUICK = get(ENV, "CONCOURSE_TEST_QUICK", "0") == "1"
 nreps(n) = QUICK ? max(4, n ÷ 8) : n
