@@ -111,6 +111,21 @@ function birth_death(rate; station=:q)
     return compile(net)
 end
 
+# Batch service (capability 2): source → one FCFS station that gathers
+# batches of `min`..`max` waiting jobs into a synthetic batch job, → sink.
+# The default service law is the size-independent exponential of the
+# M/M^[K]/1 oracle (min = max = K); pass a law reading Mark(:batchsize) for
+# the size-dependent variants (Inoue's affine batch processing time).
+function batch_mmk1(; min, max=min, service=Law(:Exponential; scale=inv(Param(:mu))))
+    net = QueueNetwork(; param_names=(:lambda, :mu))
+    source!(net, :arrive; interarrival=Law(:Exponential; scale=inv(Param(:lambda))))
+    station!(net, :gate; servers=1, service, batching=Batching(; min, max))
+    sink!(net, :done)
+    route!(net, :arrive, Always(:gate))
+    route!(net, :gate, Always(:done))
+    return compile(net)
+end
+
 # CONCOURSE_TEST_QUICK=1 shrinks replication counts for fast local iteration.
 const QUICK = get(ENV, "CONCOURSE_TEST_QUICK", "0") == "1"
 nreps(n) = QUICK ? max(4, n ÷ 8) : n
