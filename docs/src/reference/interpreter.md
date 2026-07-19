@@ -18,6 +18,19 @@ time_average
 number_in_system
 ```
 
+## Runtime errors
+
+A model compiled with `allow_blocking_cycles = true` (see
+[`compile`](@ref)) raises one typed exception when a cycle of full `:block`
+buffers wedges; it arrives carrying the partial record, so the deadlock is
+replayable evidence. The
+[Cycles section](../queues/richer_stations.md#Cycles) of the blocking
+tutorial shows it in action.
+
+```@docs
+BlockingDeadlock
+```
+
 ## Samplers
 
 `FirstToFireMethod`, `NextReactionMethod`, and `FirstReactionMethod` are

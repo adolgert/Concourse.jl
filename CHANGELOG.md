@@ -10,6 +10,36 @@ and this project adheres to
 
 ### Added
 
+- Cyclic blocking: `compile(net; allow_blocking_cycles = true)` skips the
+  blocking-cycle check (C3) and lets `:block` cycles run; the default is
+  byte-for-byte unchanged. When a cycle of full buffers actually wedges —
+  every station on the cycle full and holding a finished job routed to the
+  next — the simulation raises `BlockingDeadlock`, a typed exported
+  exception carrying the cycle's station names in routing order, the wall
+  time, the held job ids, and the partial record (throwing firing
+  included, horizon set to the deadlock time). A deadlock is a state
+  property, so `replay` of the record reproduces the trajectory and
+  re-raises the identical error at the same firing. The settle cascade's
+  fuel-bound backstop message now points at `allow_blocking_cycles` and
+  `BlockingDeadlock`. Deadlock *resolution* (simultaneous exchange)
+  remains unsupported.
+- F9 (cascade worklist-order independence) re-examined under cyclic
+  blocking and holding: FIFO and LIFO worklists either both reach the
+  horizon with identical records or both raise the identical
+  `BlockingDeadlock`, because `FCFSUnblock` admits the longest-blocked
+  transfer from a per-destination queue regardless of cascade order.
+- Cyclic-blocking tests: the two-station wedge with the exact error and
+  replay determinism, a non-deadlocking loop against an exact transient
+  CTMC oracle (which also bounds the wedging probability, showing the
+  non-deadlocking regime is structural, not just light load), FIFO/LIFO
+  agreement under two-sided blocking including wedging trials, the C3
+  default-rejection regression, a three-station cycle through a
+  `Probabilistic` kernel, and flag inertness on acyclic nets.
+- A "Cycles" section on the blocking tutorial page (what deadlock means
+  under blocking-after-service, the flag, the replayable error, why
+  resolution is out of scope); `BlockingDeadlock` on the interpreter
+  reference page; README Limitations updated.
+
 - Closed networks: `populate!(net, station, count; mark)` seeds a fixed
   population at a service station before time zero. Jobs are filed into
   the buffer in declaration order and dispatched by one settle cascade

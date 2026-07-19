@@ -668,6 +668,11 @@ reader's surviving service clocks whenever a watched count changes.
 
 `population` holds the network's [`populate!`](@ref) entries in declaration
 order, with stations as indices; [`initial_state`](@ref) seeds them.
+
+`allow_blocking_cycles` records that [`compile`](@ref) was asked to skip
+check C3: the topology may contain a cycle of finite `:block` buffers, and
+the interpreter's deposit step watches for a realized deadlock at runtime,
+raising [`BlockingDeadlock`](@ref).
 """
 struct QueueGSMP
     stations::Vector{CompiledStation}
@@ -676,6 +681,7 @@ struct QueueGSMP
     srv_readers::Vector{Vector{Int}}
     buf_readers::Vector{Vector{Int}}
     population::Vector{CompiledPopulation}
+    allow_blocking_cycles::Bool
 end
 
 function _compilekernel(k::Always, names)
@@ -700,11 +706,17 @@ function _compilekernel(k::RoundRobin, names)
 end
 
 """
-    compile(net::QueueNetwork) -> QueueGSMP
+    compile(net::QueueNetwork; allow_blocking_cycles=false) -> QueueGSMP
 
 Freeze a network into a [`QueueGSMP`](@ref), the intermediate
 representation the interpreter and the estimators read. Station names
 become integer indices and parameter names become positions in `θ`.
+
+`allow_blocking_cycles = true` skips the blocking-cycle check (C3 below)
+and marks the model cyclic-permitted: the simulation runs until a cycle of
+full `:block` buffers actually wedges, at which point it raises a
+[`BlockingDeadlock`](@ref) naming the cycle. Deadlock *resolution* is
+unsupported.
 
 `compile` also runs the static checks and throws `ArgumentError` at the
 first violation:
@@ -719,7 +731,7 @@ first violation:
 - deterministic kernels ([`ByMark`](@ref)) read marks only;
 - every law reads only declared parameters and marks some source produces;
 - no cycle of finite `:block` buffers exists, because a full cycle would
-  deadlock;
+  deadlock (check C3; skipped under `allow_blocking_cycles`);
 - station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is read only by
   the service law of a station, and every occupancy read names a declared
   station (check C5);
@@ -730,10 +742,10 @@ first violation:
 - every station on a tracked branch — strictly between a fork and its
   canceling join — receives sibling traffic only (check C9).
 """
-function compile(net::QueueNetwork)
+function compile(net::QueueNetwork; allow_blocking_cycles::Bool=false)
     names = Dict{Symbol,Int}(s.name => i for (i, s) in enumerate(net.stations))
     params = Dict{Symbol,Int}(p => i for (i, p) in enumerate(net.param_names))
-    check_network(net, names, params)
+    check_network(net, names, params; allow_blocking_cycles)
     cancelmap = check_cancellation(net, names)
     stations = CompiledStation[]
     for s in net.stations
@@ -791,13 +803,15 @@ function compile(net::QueueNetwork)
     population = CompiledPopulation[
         CompiledPopulation(Int32(names[p.station]), p.count, p.mark) for p in net.population
     ]
-    return QueueGSMP(stations, names, params, srv_readers, buf_readers, population)
+    return QueueGSMP(
+        stations, names, params, srv_readers, buf_readers, population, allow_blocking_cycles
+    )
 end
 
 # Check C1 (structure) and the parts of C2 (mark dataflow) and the randomness
 # rules that need no traffic equations. Total functions of the value, per
 # queue_layers.tex §3.7 — possible only because A3 made the laws inspectable.
-function check_network(net::QueueNetwork, names, params)
+function check_network(net::QueueNetwork, names, params; allow_blocking_cycles::Bool=false)
     any(s -> s.kind == :source, net.stations) ||
         !isempty(net.population) ||
         throw(
@@ -861,7 +875,7 @@ function check_network(net::QueueNetwork, names, params)
             ),
         )
     end
-    check_blocking_acyclic(net)
+    allow_blocking_cycles || check_blocking_acyclic(net)
     check_state_reads(net, names)
     check_batching(net)
     # A batch station's synthetic batch job carries the mark `batchsize`, so
@@ -1090,7 +1104,9 @@ _kerneldests(k::RoundRobin) = Tuple(k.dests)
 # Check C3: a cycle of stations that can transfer-block each other is a
 # deadlock reachable when every buffer in the cycle fills, and it is also the
 # precondition under which the settle cascade's termination argument (F6)
-# holds — so it is an error, not a warning.
+# holds — so it is an error, not a warning. compile's allow_blocking_cycles
+# skips this check; deposit! then watches the realized wait-for graph and
+# raises BlockingDeadlock the moment an actual deadlock forms.
 function check_blocking_acyclic(net::QueueNetwork)
     canblock(s) = s.kind == :station && s.overflow == :block && s.capacity != typemax(Int)
     byname = Dict(s.name => s for s in net.stations)

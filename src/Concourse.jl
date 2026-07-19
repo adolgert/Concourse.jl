@@ -52,6 +52,7 @@ export QueueGSMP, QueueState, ClockKey
 export initial_state, enabled, clock_distribution, fire_changes, states_equal
 # The interpreter and the record
 export simulate, MarkedRecord, replay, time_average, number_in_system
+export BlockingDeadlock
 export FirstToFireMethod, NextReactionMethod, FirstReactionMethod
 # The ClockGradients binding
 export ReplayModel, replay_model, live_model

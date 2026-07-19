@@ -91,15 +91,20 @@ The design splits contention from propagation:
 - **Propagation is order-free.** With contention delegated to policy, the
   claim is that the remaining cascade relation is *confluent*: any fair
   processing order reaches the same fixed point. Termination comes from
-  check C3 (acyclic blocking chains). Confluence plus termination give a
-  unique normal form.
+  check C3 (acyclic blocking chains) — or, when `compile` was passed
+  `allow_blocking_cycles`, from runtime detection: a realized cycle of
+  full holding stations raises `BlockingDeadlock` the moment its closing
+  block-edge forms, instead of cascading forever. Confluence plus
+  termination give a unique normal form.
 
 The implementation still fixes a canonical order — a first-in-first-out
 worklist seeded with the destination, then the origin — so behavior is
 deterministic even if the confluence claim were false. A debug-build fuel
 counter turns nontermination into an error rather than a hang. The claim is
 tested as F9: run the same trajectories with FIFO and LIFO worklists and
-require equal states at every index. It holds.
+require equal states at every index. It holds, on acyclic and on cyclic
+blocking topologies alike — on a cycle, both orders either reach the
+horizon with identical records or raise the identical `BlockingDeadlock`.
 
 ## D3: the interpreter owns the record
 
@@ -222,7 +227,7 @@ Continuing the numbering from
 
 | Item | Claim | Status | Test |
 |---|---|---|---|
-| F9 | Cascade confluence: with contention resolved by `UnblockPolicy`, the fixed point is order-independent (FIFO vs LIFO worklists, random blocking networks). | Tested, holding | `test/test_blocking.jl` |
+| F9 | Cascade confluence: with contention resolved by `UnblockPolicy`, the fixed point is order-independent (FIFO vs LIFO worklists, random blocking networks; on cycles, identical records or identical deadlocks). | Tested, holding | `test/test_blocking.jl`, `test/test_blocking_cycles.jl` |
 | F10 | Sampler agnosticism: no charter result depends on the sampler; oracles pass under multiple builder outcomes. | Tested, holding | `test/test_samplers.jl` |
 | F11 | Delta fidelity: emitted deltas agree with the recompute oracle — membership and anchor assertions over long mixed runs, including preemption and PS. | Tested, holding | debug oracle, asserted in every debug-mode run |
 | F12 | Protocol portability: `check_branchable` passes in full on `ConcourseWorld`, for frozen-law models and for PS. | Tested, holding | `test/test_branch.jl` |

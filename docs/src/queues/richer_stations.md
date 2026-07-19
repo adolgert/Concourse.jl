@@ -318,8 +318,98 @@ println(arrivals, " arrivals − ", completions, " completions = ",
 ```
 
 One structural fact worth knowing: a *cycle* of stations that can block each
-other is a deadlock waiting to happen, so `compile` rejects such networks
-outright rather than letting a simulation hang.
+other is a deadlock waiting to happen. By default [`compile`](@ref) rejects
+such networks (check C3) rather than let a simulation hang — but real
+systems do have loops (rework sent back upstream, a token ring), and for
+those the next section shows how to run one anyway and what happens the
+moment it wedges.
+
+### Cycles
+
+Under transfer blocking, a **deadlock** is a cycle of stations, each with a
+full buffer, each holding a finished job routed to the next station on the
+cycle. Nothing can ever move again: the only slots that could receive a
+held job are occupied by jobs whose own destinations are full, all the way
+around the ring, and no future event frees space because each held job's
+destination is already chosen. Passing `allow_blocking_cycles = true` to
+[`compile`](@ref) skips check C3 and lets a cyclic topology run; the moment
+the closing block-edge of a cycle forms, the simulation raises
+[`BlockingDeadlock`](@ref) instead of hanging. The exception carries the
+cycle's station names in routing order, the wall time, the held job ids,
+and the partial record — every firing up to and including the one that
+deadlocked, with the horizon set to the deadlock time.
+
+Here is a two-station loop fed hard enough to wedge: jobs go
+`:a → :b`, and `:b` sends three quarters of its output back to `:a`. Both
+buffers hold one job, so once each station is full and holding a job bound
+for the other, the ring is closed:
+
+```@example richer
+loop = QueueNetwork(param_names = (:lambda, :mu_a, :mu_b))
+source!(loop, :arrive; interarrival = Law(:Exponential, scale = inv(Param(:lambda))))
+station!(loop, :a; service = Law(:Exponential, scale = inv(Param(:mu_a))),
+         capacity = 1, overflow = :block)
+station!(loop, :b; service = Law(:Exponential, scale = inv(Param(:mu_b))),
+         capacity = 1, overflow = :block)
+sink!(loop, :done)
+route!(loop, :arrive, Always(:a))
+route!(loop, :a, Always(:b))
+route!(loop, :b, Probabilistic(:a => 0.75, :done => 0.25))
+ml = compile(loop; allow_blocking_cycles = true)
+
+err = try
+    simulate(ml, [4.0, 1.0, 1.0], 1000.0; seed = 1)
+catch e
+    e
+end
+println(sprint(showerror, err))
+```
+
+A deadlock is a property of the state, not of the random draws, so the
+attached record is replayable evidence: [`replay`](@ref) reproduces the
+trajectory and re-raises the identical error at the same firing.
+
+```@example richer
+rec = err.record
+println("record stops at the deadlock: horizon = ", rec.horizon,
+        ", last firing at t = ", rec.time[end])
+err2 = try
+    replay(ml, rec)
+catch e
+    e
+end
+println("replay re-raises the same deadlock: ",
+        err2.cycle == err.cycle && err2.time == err.time && err2.jobs == err.jobs)
+```
+
+The cascade's order-independence claim
+([F9 in the event-loop charter](../developer/event_loop.md#Charter-F9-F14))
+was argued for acyclic blocking and has been re-examined under cycles: it
+holds. On a cyclic topology under load, FIFO and LIFO worklists either both
+reach the horizon with identical records or both raise the identical
+`BlockingDeadlock` — freed waiting room admits the longest-blocked transfer
+from a per-destination queue (`FCFSUnblock`), so cascade order can change
+*when* a settle runs but never which blocked transfer wins the room.
+
+One dynamics fact the tests make vivid: deadlock hazard accrues on every
+blocking episode, regardless of utilization. A cycle in which both edges
+actually block carries a positive wedging probability per episode, so it
+wedges eventually — light load only stretches the expected time. A run that
+should reach its horizon needs the closing edge *structurally* out of
+reach, not merely improbable per unit time: in the two-station loop above, a
+wide buffer at `:a` keeps the `:b → :a` edge from ever forming, and a small
+CTMC computation in the test suite puts the wedging probability below
+``10^{-5}`` over the whole horizon.
+
+What Concourse does *not* offer is deadlock resolution — policies like the
+simultaneous exchange, where every job on a wedged cycle rotates one
+station forward at once. Resolution is a modeling decision with real
+degrees of freedom (who moves, in what order, what the service clocks do)
+and no canonical answer, so for now the library reports the deadlock
+precisely and stops rather than pick a resolution silently. (Relatedly, if
+a blocking network ever dies with the settle-cascade fuel error instead,
+recompile with `allow_blocking_cycles = true` to get the precise
+`BlockingDeadlock` diagnosis.)
 
 ## Reneging
 
