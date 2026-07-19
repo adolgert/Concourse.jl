@@ -10,6 +10,34 @@ and this project adheres to
 
 ### Added
 
+- Mark redraw on deposit: `station!(...; remark = (name = Law(...), ...))`
+  declares laws (a `NamedTuple` or a `MarkLaw`) drawn when a job is
+  deposited into the station from outside — filing into the buffer, or
+  turning back blocked — and merged over the job's marks (same names
+  replace, new names extend), before the discipline or the service law
+  reads them. Every remark law is evaluated against the job's pre-redraw
+  marks, then the drawn values merge, so laws reading each other's names
+  swap. Re-files within the station (a preempted job's return, an
+  unblocked transfer's admission) redraw nothing. Remark draws flow
+  through the depositing firing's draw source, land in the record like
+  any mark draw, and replay exactly.
+- Compile check C11: remark laws obey source-mark-law scope — no station
+  state. The mark census turns placement-aware for remark marks: a
+  remark-only mark is readable at the remark station and downstream of
+  it, never upstream, and a remark law reads only marks on the job
+  before the redraw. `branch_world` refuses θ-reading remark laws
+  exactly as it refuses θ-reading source mark laws.
+- Remark tests: the two-hop tandem whose hops match their own M/M/1
+  occupancies (a mark leaking across hops would land on the wrong
+  moments), the pre-redraw swap convention with the draws visible in the
+  record, replay equality with loud truncation of a remark draw, the
+  once-per-deposit count under blocking and unblocking, the branching
+  refusal, and the C11/census messages verbatim.
+- Docs: a "Redrawing marks en route" section on the marks tutorial page,
+  the `station!` remark keyword, an estimator-validity note (remark
+  draws are ordinary recorded mark draws — no new row), and the README
+  branching limitation extended to remark laws.
+
 - Cyclic blocking: `compile(net; allow_blocking_cycles = true)` skips the
   blocking-cycle check (C3) and lets `:block` cycles run; the default is
   byte-for-byte unchanged. When a cycle of full buffers actually wedges —

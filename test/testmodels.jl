@@ -195,6 +195,36 @@ function closed_cycle(
     return compile(net)
 end
 
+# Two-hop tandem with a per-hop redrawn size (capability 7): the source
+# stamps size ~ Exp(mean m1), each hop serves Dirac(Mark(:size)) — so each
+# hop is exactly M/M/1 with its own size moments — and :hop2's remark
+# redraws size ~ Exp(mean m2) at deposit. Had the mark leaked across the
+# hops, :hop2 would sit at :hop1's moments instead. `thetafree` freezes the
+# size scales at 0.5 and 0.25 so branch_world admits the model.
+function remark_tandem(; thetafree=false)
+    net = QueueNetwork(; param_names=(:lambda, :m1, :m2))
+    scale1 = thetafree ? Const(0.5) : Param(:m1)
+    scale2 = thetafree ? Const(0.25) : Param(:m2)
+    source!(
+        net,
+        :arrive;
+        interarrival=Law(:Exponential; scale=inv(Param(:lambda))),
+        mark=MarkLaw(; size=Law(:Exponential; scale=scale1)),
+    )
+    station!(net, :hop1; service=Law(:Dirac; value=Mark(:size)))
+    station!(
+        net,
+        :hop2;
+        service=Law(:Dirac; value=Mark(:size)),
+        remark=(size=Law(:Exponential; scale=scale2),),
+    )
+    sink!(net, :done)
+    route!(net, :arrive, Always(:hop1))
+    route!(net, :hop1, Always(:hop2))
+    route!(net, :hop2, Always(:done))
+    return compile(net)
+end
+
 # CONCOURSE_TEST_QUICK=1 shrinks replication counts for fast local iteration.
 const QUICK = get(ENV, "CONCOURSE_TEST_QUICK", "0") == "1"
 nreps(n) = QUICK ? max(4, n ÷ 8) : n

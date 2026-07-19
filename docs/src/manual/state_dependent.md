@@ -247,6 +247,14 @@ discontinuity and no new likelihood term. A θ-reading *initial* mark law
 falls under the θ-dependent-mark row above — `branch_world` refuses it
 exactly as it refuses a source's.
 
+[Mark redraw on deposit](../queues/marks.md#Redrawing-marks-en-route)
+(`station!`'s `remark`) earns no row for the same reason: remark draws are
+ordinary recorded mark draws, consumed at the depositing firing and
+replayed from its draw list, so they add no new likelihood term and no
+event-order discontinuity beyond what the marks they replace already
+carry. A θ-reading remark law falls under the θ-dependent-mark row above —
+`branch_world` refuses it exactly as it refuses a source's.
+
 See [Gradient estimation](gradients.md) for the estimators themselves and
 for the processor-sharing experiment that first demonstrated the IPA
 failure on multi-segment records.

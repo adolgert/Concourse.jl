@@ -47,7 +47,8 @@ Pkg.add(url = "https://github.com/adolgert/Concourse.jl")
 
 ## Limitations
 
-Mark laws that read a parameter are refused under branching worlds
+Mark laws that read a parameter — a source's, a population's, or a
+station's deposit-time `remark` — are refused under branching worlds
 (`branch_world` raises an `ArgumentError`): a θ-dependent mark law would
 add a derivative term of its own to every estimator, and that term is not
 implemented. The

@@ -125,6 +125,44 @@ Both stations match their closed forms. Note what was checked: a *derived*
 property (thinning) of a *composite* mechanism (mark draw, `ByMark` kernel,
 two stations), against formulas that never mention marks at all.
 
+## Redrawing marks en route
+
+A mark is stamped at birth, but some models want a fresh value at each
+visit: a request that arrives at its next station with a new size, a
+re-entrant flow whose every pass draws its own work. The `remark` keyword
+of `station!` declares laws that are redrawn when a job is deposited into
+the station from outside — same names replace the job's marks, new names
+extend them:
+
+```julia
+station!(net, :hop2;
+         service = Law(:Dirac, value = Mark(:size)),
+         remark = (size = Law(:Exponential, scale = Const(0.25)),))
+```
+
+The redraw happens before anything at the station reads marks, so an
+ordered discipline files the job by its new values and the service law
+sees them. Three conventions:
+
+- **Pre-redraw reads.** Every remark law is evaluated against the job's
+  marks *before* the redraw, and only then do the drawn values merge — so
+  `remark = (a = Law(:Dirac, value = Mark(:b)), b = Law(:Dirac, value = Mark(:a)))`
+  swaps `a` and `b`.
+- **Once per deposit from outside.** Moves within the station — a
+  preempted job returning to the buffer, a blocked transfer finally
+  admitted — redraw nothing; the blocked transfer drew at the deposit
+  that blocked it.
+- **Recorded like any mark.** Remark draws ride the depositing firing's
+  draw list in the record, so replay reproduces them, and the compile-time
+  census knows where they exist: a law may read a remark-only mark at the
+  remark station or downstream of it, never upstream, and a remark law may
+  not read station state (check C11).
+
+Two exponential hops where the second redraws `size`, as above, is the
+sharpest self-check: each hop is an M/M/1 on its *own* size moments, and
+the tandem matches both closed forms only if the redraw really replaced
+the mark at the second hop.
+
 ## Where this leads
 
 Marks are the whole multi-class apparatus in one primitive. Stamp a `class`

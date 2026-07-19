@@ -46,16 +46,21 @@ mutable struct ConcourseWorld{C}
 end
 
 function _assert_thetafree_marks(m::QueueGSMP)
+    # Remark laws are mark laws drawn at deposit instead of at birth; a
+    # θ-reading remark would add the same unimplemented derivative term as a
+    # θ-reading source mark, so the refusal extends verbatim.
     for stn in m.stations
-        stn.mark === nothing && continue
-        for (name, law) in stn.mark.laws
-            ps = reads_params(law)
-            isempty(ps) || throw(
-                ArgumentError(
-                    "branchable worlds support θ-free marks only for now; mark " *
-                    "$name of $(stn.name) reads parameters $(sort!(collect(ps)))",
-                ),
-            )
+        for (kindword, ml) in (("mark", stn.mark), ("remark", stn.remark))
+            ml === nothing && continue
+            for (name, law) in ml.laws
+                ps = reads_params(law)
+                isempty(ps) || throw(
+                    ArgumentError(
+                        "branchable worlds support θ-free marks only for now; $kindword " *
+                        "$name of $(stn.name) reads parameters $(sort!(collect(ps)))",
+                    ),
+                )
+            end
         end
     end
     # Population mark laws are mark laws; a θ-reading initial mark would add
@@ -110,7 +115,8 @@ redraw-at-next method would fail `ClockGradients.check_branchable`
 honestly.
 
 Marks, [`Probabilistic`](@ref) routing, and [`SIRO`](@ref) are admitted
-because their draws are θ-free. A mark law that reads a parameter is
+because their draws are θ-free. A mark law that reads a parameter — a
+source's, or a station's deposit-time `remark` — is
 refused with an `ArgumentError`: its own derivative would add a term to
 every estimator, and that term is not implemented. A service law that reads
 station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is refused too:

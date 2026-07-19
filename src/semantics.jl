@@ -373,6 +373,27 @@ end
 # deposit and the settle cascade — pure state movement; clock lifecycle is
 # derived afterwards from the membership these moves imply.
 
+# Mark redraw on deposit (capability 7): a station's remark laws are drawn
+# through the firing's DrawSource when a job arrives from OUTSIDE — filing
+# into the buffer, or turning back blocked — and never on moves within the
+# station (an eviction's return, an unblocked transfer's admission). Every
+# law is evaluated against the job's PRE-redraw marks, then the drawn values
+# merge over them — same names replace, new names extend — so an :ordered
+# insert and the service law see the new values. A dropped job redraws
+# nothing: no draw is consumed for a job that never files.
+function remark!(m::QueueGSMP, st::QueueState, d::Int, j::JobId, draws::DrawSource)
+    ml = m.stations[d].remark
+    ml === nothing && return nothing
+    old = st.jobs[j]
+    drawn = NamedTuple()
+    for (name, law) in ml.laws
+        v = drawmark!(draws, name, law, old, st.time)
+        drawn = merge(drawn, NamedTuple{(name,)}((v,)))
+    end
+    st.jobs[j] = merge(old, drawn)
+    return nothing
+end
+
 # `holdable` says whether a job that meets a full :block destination may be
 # held in the origin's server. Every ordinary deposit is holdable; a batch
 # member deposited after its batch fired is not, because the batch job's
@@ -475,6 +496,11 @@ function deposit!(
             # A source has no server to hold a blocked job, so an external
             # arrival to a full :block station is lost, not blocked.
             if holdable && stn.overflow == :block && m.stations[origin].kind == :station
+                # The redraw belongs to the deposit, not to the eventual
+                # unblock re-file — that one happens in some later firing's
+                # settle and replays no draw — so a blocked transfer redraws
+                # now, while this firing's draw source is in hand.
+                remark!(m, st, d, j, draws)
                 push!(st.hold[origin], j)
                 push!(st.blocked[d], (Int32(origin), j))
                 push!(touched, origin)
@@ -488,6 +514,7 @@ function deposit!(
                 g != JobId(0) && _prune_member!(st, g, j)
             end
         else
+            remark!(m, st, d, j, draws)
             file_into_buffer!(m, st, d, j)
             push!(wl, d)
         end

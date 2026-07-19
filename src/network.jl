@@ -232,6 +232,7 @@ struct SurfaceStation
     need::Int                             # joins only: siblings that trigger the merge
     cancel::Symbol                        # joins only: :none | :on_completion | :on_start
     batching::Union{Batching,Nothing}     # stations only
+    remark::Union{MarkLaw,Nothing}        # stations only: mark redraw on deposit
 end
 
 # One populate! declaration: `count` jobs seeded at `station` before time
@@ -319,6 +320,7 @@ function source!(
             0,
             :none,
             nothing,
+            nothing,
         ),
     )
 end
@@ -326,7 +328,8 @@ end
 """
     station!(net, name::Symbol; service, discipline=FCFS(), servers=1,
              capacity=typemax(Int), overflow=:drop, unblock=FCFSUnblock(),
-             patience=nothing, renege_to=nothing, batching=nothing)
+             patience=nothing, renege_to=nothing, batching=nothing,
+             remark=nothing)
 
 Add a service station called `name` to the network.
 
@@ -362,6 +365,20 @@ Add a service station called `name` to the network.
   the service law to read, and on completion the members route
   individually. Batching requires the [`FCFS`](@ref) discipline
   (check C6).
+- `remark`: a `NamedTuple` of laws (or a [`MarkLaw`](@ref)), or `nothing`
+  (the default). The laws are drawn when a job is deposited into the
+  station from *outside* and merged over the job's marks — same names
+  replace, new names extend — before the discipline or the service law
+  reads them, so an `:ordered` insert files the job by its new values.
+  Every remark law is evaluated against the job's *pre-redraw* marks,
+  then the drawn values merge, so a pair of laws reading each other's
+  names swaps them. Re-files within the station — an evicted job's
+  return, an unblocked transfer's admission (the redraw happened at the
+  deposit that blocked it) — redraw nothing. Remark draws flow through
+  the depositing firing's draw source and land in the record like any
+  mark draw; a remark law may not read station state (check C11), and a
+  remark-only mark is readable at this station and downstream of it,
+  never upstream.
 
 A station needs a [`route!`](@ref) saying where finished jobs go.
 """
@@ -377,9 +394,11 @@ function station!(
     patience::Union{AbstractLaw,Nothing}=nothing,
     renege_to::Union{Symbol,Nothing}=nothing,
     batching::Union{Batching,Nothing}=nothing,
+    remark::Union{MarkLaw,NamedTuple,Nothing}=nothing,
 )
     (patience === nothing) == (renege_to === nothing) ||
         throw(ArgumentError("patience and renege_to come together"))
+    rml = remark isa NamedTuple ? MarkLaw(; remark...) : remark
     return _addstation!(
         net,
         SurfaceStation(
@@ -399,6 +418,7 @@ function station!(
             0,
             :none,
             batching,
+            rml,
         ),
     )
 end
@@ -429,6 +449,7 @@ function sink!(net::QueueNetwork, name::Symbol)
             0,
             0,
             :none,
+            nothing,
             nothing,
         ),
     )
@@ -475,6 +496,7 @@ function fork!(net::QueueNetwork, name::Symbol; branches)
             0,
             0,
             :none,
+            nothing,
             nothing,
         ),
     )
@@ -550,6 +572,7 @@ function join!(net::QueueNetwork, name::Symbol; parts::Int, need::Int=parts, can
             parts,
             need,
             cancel,
+            nothing,
             nothing,
         ),
     )
@@ -638,6 +661,7 @@ struct CompiledStation
     # the stamp is unambiguous and the runtime needs no group-to-join map.
     cancel_join::Int32
     batching::Union{Batching,Nothing}   # stations only
+    remark::Union{MarkLaw,Nothing}      # stations only: mark redraw on deposit
 end
 
 # A populate! entry in station-index form, in declaration order — the order
@@ -737,6 +761,10 @@ first violation:
   station (check C5);
 - every station that declares [`Batching`](@ref) uses the non-preemptive
   FCFS discipline (check C6);
+- remark laws obey source-mark-law scope — no station-state reads
+  (check C11) — and read only marks the job carries *before* the redraw;
+  a remark-only mark is readable at the remark station and downstream of
+  it, never upstream;
 - a fork's siblings can reach at most one canceling join, so which join
   triggers a group's cancellation is unambiguous (check C8);
 - every station on a tracked branch — strictly between a fork and its
@@ -774,6 +802,7 @@ function compile(net::QueueNetwork; allow_blocking_cycles::Bool=false)
                 s.cancel,
                 cj,
                 s.batching,
+                s.remark,
             ),
         )
     end
@@ -878,33 +907,106 @@ function check_network(net::QueueNetwork, names, params; allow_blocking_cycles::
     allow_blocking_cycles || check_blocking_acyclic(net)
     check_state_reads(net, names)
     check_batching(net)
-    # A batch station's synthetic batch job carries the mark `batchsize`, so
-    # its service law alone may read that mark on top of what sources produce.
-    batch_marks = union(produced_marks, (:batchsize,))
+    # Mark redraw on deposit: a remark-produced mark exists on jobs only from
+    # the redraw onward, so its availability is placement-aware — the remark
+    # station itself and everything downstream — while source and populate!
+    # marks keep C2's conservative global availability.
+    remark_at, remark_before = _remark_availability(net)
     for s in net.stations
         s.renege_to === nothing ||
             haskey(names, s.renege_to) ||
             throw(ArgumentError("renege_to at $(s.name) targets unknown station $(s.renege_to)"))
-        service_marks = s.batching === nothing ? produced_marks : batch_marks
-        for (law, allowed) in ((s.service, service_marks), (s.patience, produced_marks))
+        avail = union(produced_marks, get(remark_at, s.name, Set{Symbol}()))
+        # A batch station's synthetic batch job carries the mark `batchsize`,
+        # so its service law alone may read that mark on top of the rest.
+        service_marks = s.batching === nothing ? avail : union(avail, (:batchsize,))
+        for (law, allowed) in ((s.service, service_marks), (s.patience, avail))
             law === nothing && continue
             for p in reads_params(law)
                 haskey(params, p) ||
                     throw(ArgumentError("law at $(s.name) reads unknown parameter $p"))
             end
             # C2, conservatively: any read mark must be produced by some
-            # source or populate! entry. The routing-graph dataflow
-            # refinement is future work.
+            # source or populate! entry, or by a remark at or upstream of
+            # this station. The routing-graph dataflow refinement for
+            # source marks is future work.
             for mk in reads_marks(law)
                 mk in allowed || throw(
                     ArgumentError(
-                        "law at $(s.name) reads mark $mk no source or populate! produces"
+                        "law at $(s.name) reads mark $mk no source, populate!, " *
+                        "or upstream remark produces",
                     ),
                 )
             end
         end
+        # Remark laws read the job's PRE-redraw marks, so their census is the
+        # availability just before the redraw: sources, populations, and
+        # remarks strictly upstream (this station's own names only if a cycle
+        # carries them back in).
+        if s.remark !== nothing
+            pre = union(produced_marks, get(remark_before, s.name, Set{Symbol}()))
+            for (name, law) in s.remark.laws
+                for p in reads_params(law)
+                    haskey(params, p) || throw(
+                        ArgumentError("remark law $name at $(s.name) reads unknown parameter $p"),
+                    )
+                end
+                for mk in reads_marks(law)
+                    mk in pre || throw(
+                        ArgumentError(
+                            "remark law $name at $(s.name) reads mark $mk, which is " *
+                            "not on the job before the redraw — remark laws read the " *
+                            "PRE-redraw marks",
+                        ),
+                    )
+                end
+            end
+        end
     end
     return nothing
+end
+
+# The placement half of the mark census (capability 7). For every station q
+# with a remark, its mark names are available to laws AT q (the redraw runs
+# before disciplines or laws read marks) and at every station reachable
+# downstream of q. `at[s]` collects the names readable by laws at s;
+# `before[s]` collects those already on the job when a redraw at s runs —
+# what s's own remark laws may read under the pre-redraw convention, which
+# includes s's own names only when a cycle routes them back into s.
+function _remark_availability(net::QueueNetwork)
+    byname = Dict(s.name => s for s in net.stations)
+    at = Dict{Symbol,Set{Symbol}}()
+    before = Dict{Symbol,Set{Symbol}}()
+    for q in net.stations
+        q.remark === nothing && continue
+        names_q = marknames(q.remark)
+        union!(get!(at, q.name, Set{Symbol}()), names_q)
+        seen = Set{Symbol}()
+        stack = _downstream(net, byname, q.name)
+        while !isempty(stack)
+            v = pop!(stack)
+            v in seen && continue
+            push!(seen, v)
+            union!(get!(at, v, Set{Symbol}()), names_q)
+            union!(get!(before, v, Set{Symbol}()), names_q)
+            append!(stack, _downstream(net, byname, v))
+        end
+    end
+    return at, before
+end
+
+# One-hop routing successors of a station: kernel destinations (fork
+# branches for a fork) plus the renege destination — every edge a job can
+# take out of it.
+function _downstream(net::QueueNetwork, byname, v::Symbol)
+    s = byname[v]
+    dests = Symbol[]
+    s.kind == :fork && append!(dests, s.branches)
+    s.kind == :fork ||
+        !haskey(net.routes, v) ||
+        append!(dests, collect(_kerneldests(net.routes[v])))
+    s.renege_to === nothing || push!(dests, s.renege_to)
+    return dests
 end
 
 # Check C5: only the service law of a station may read station occupancy
@@ -937,6 +1039,22 @@ function check_state_reads(net::QueueNetwork, names)
                         "mark law $mk at $(s.name) reads station state; state in a " *
                         "mark law would put station state into the record's mark " *
                         "draws, breaking replay — amendment A4 (check C5)",
+                    ),
+                )
+            end
+        end
+        # Check C11: remark laws obey source-mark-law scope. Their draws are
+        # mark draws in the record, so the C5 argument applies verbatim —
+        # state in the draw would break replay — but the check gets its own
+        # number because remark is a station-side law, not a source's.
+        if s.remark !== nothing
+            for (mk, law) in s.remark.laws
+                isempty(reads_state(law)) || throw(
+                    ArgumentError(
+                        "remark law $mk at $(s.name) reads station state; remark laws " *
+                        "obey source-mark-law scope, and state in a mark draw would " *
+                        "put station state into the record's mark draws, breaking " *
+                        "replay — amendment A4 (check C11)",
                     ),
                 )
             end
