@@ -150,6 +150,26 @@ function nk_race(n, k; service=Law(:Exponential; scale=inv(Param(:mu))), cancel=
     return compile(net)
 end
 
+# Closed network (capability 4): a fixed population of N jobs circulates the
+# two-station cycle :a → :b → :a, exponential service at both stations, no
+# source and no sink. `mark` gives the population drawn initial marks, which
+# land in the record's init list ("firing 0"); the service laws are
+# overridable so a mark-reading variant (speed by class) reuses the topology.
+function closed_cycle(
+    N;
+    mark=nothing,
+    service_a=Law(:Exponential; scale=inv(Param(:mu1))),
+    service_b=Law(:Exponential; scale=inv(Param(:mu2))),
+)
+    net = QueueNetwork(; param_names=(:mu1, :mu2))
+    station!(net, :a; service=service_a)
+    station!(net, :b; service=service_b)
+    route!(net, :a, Always(:b))
+    route!(net, :b, Always(:a))
+    populate!(net, :a, N; mark)
+    return compile(net)
+end
+
 # CONCOURSE_TEST_QUICK=1 shrinks replication counts for fast local iteration.
 const QUICK = get(ENV, "CONCOURSE_TEST_QUICK", "0") == "1"
 nreps(n) = QUICK ? max(4, n ÷ 8) : n
