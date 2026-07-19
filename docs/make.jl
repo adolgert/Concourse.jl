@@ -39,6 +39,10 @@ makedocs(
             "manual/closed_networks.md",
             "manual/bcmp_hpc.md",
             "manual/yang_llm_mg1.md",
+            "manual/inoue2021_dynamic_batching.md",
+            "manual/mitzenmacher2025_predictions.md",
+            "manual/dai2026_llm_scheduling.md",
+            "manual/dong2026_flow_control.md",
             "manual/smt2020_hvlm.md",
         ],
         "Reference" => [
