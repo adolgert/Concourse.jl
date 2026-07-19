@@ -367,7 +367,7 @@ wanted("batch checks: c6 discipline, batching bounds, batchsize mark scope") &&
         route!(net, :arrive, Always(:gate))
         route!(net, :gate, Always(:tail))
         route!(net, :tail, Always(:done))
-        @test_throws "law at tail reads mark batchsize no source produces" compile(net)
+        @test_throws "law at tail reads mark batchsize no source or populate! produces" compile(net)
 
         # C2: even at a batch station, only the SERVICE law sees batchsize —
         # patience clocks belong to waiting members, which are not batches.
@@ -385,5 +385,5 @@ wanted("batch checks: c6 discipline, batching bounds, batchsize mark scope") &&
         sink!(net, :lost)
         route!(net, :arrive, Always(:gate))
         route!(net, :gate, Always(:done))
-        @test_throws "law at gate reads mark batchsize no source produces" compile(net)
+        @test_throws "law at gate reads mark batchsize no source or populate! produces" compile(net)
     end

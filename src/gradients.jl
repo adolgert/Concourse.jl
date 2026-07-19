@@ -25,6 +25,7 @@ to `ClockGradients.gradient_record`, `score_gradient`, `ipa_gradient`, and
 struct ReplayModel
     m::QueueGSMP
     draws::Union{Nothing,Vector{DrawList}}
+    init::DrawList        # the record's "firing 0" draws; seeds the population
 end
 
 """
@@ -43,7 +44,7 @@ grec = ClockGradients.gradient_record(rm, rec, θ)
 ClockGradients.score_gradient(rm, θ, grec)
 ```
 """
-replay_model(m::QueueGSMP, rec::MarkedRecord) = ReplayModel(m, rec.draws)
+replay_model(m::QueueGSMP, rec::MarkedRecord) = ReplayModel(m, rec.draws, rec.init)
 
 """
     live_model(m::QueueGSMP) -> ReplayModel
@@ -52,34 +53,40 @@ The off-record binding, for estimators that continue past any record, such
 as `ClockGradients.spa_gradient` (SPA = smoothed perturbation analysis).
 `fire` runs with an empty draw source, so this binding works only for
 models that consume no auxiliary randomness — no marks, no
-[`Probabilistic`](@ref) routing, no [`SIRO`](@ref). A model that asks for a
-draw fails loudly instead of replaying stale values.
+[`Probabilistic`](@ref) routing, no [`SIRO`](@ref), and no
+[`populate!`](@ref) mark laws (the init binding is empty too, so a drawn
+initial mark fails loudly at seeding). A model that asks for a draw fails
+loudly instead of replaying stale values.
 """
-live_model(m::QueueGSMP) = ReplayModel(m, nothing)
+live_model(m::QueueGSMP) = ReplayModel(m, nothing, DrawList())
 
 function _model_draws(rm::ReplayModel, key::ClockKey, st::QueueState)
     rm.draws === nothing && return replaydraws(key, DrawList(), rm.m.params)
     st.nfired < length(rm.draws) ||
         error("replay past the record: firing $(st.nfired + 1) of $(length(rm.draws))")
-    replaydraws(key, rm.draws[st.nfired + 1], rm.m.params)
+    return replaydraws(key, rm.draws[st.nfired + 1], rm.m.params)
 end
 
-ClockGradients.initial_state(rm::ReplayModel) = initial_state(rm.m)
+function ClockGradients.initial_state(rm::ReplayModel)
+    return initial_state(rm.m, replaydraws(INIT_KEY, rm.init, rm.m.params))
+end
 ClockGradients.clockkeytype(rm::ReplayModel) = ClockKey
 ClockGradients.enabled(rm::ReplayModel, st::QueueState) = enabled(rm.m, st)
-ClockGradients.clock_distribution(rm::ReplayModel, θ::AbstractVector,
-                                  key::ClockKey, st::QueueState) =
-    clock_distribution(rm.m, θ, key, st)
-
-function ClockGradients.fire(rm::ReplayModel, st::QueueState, key::ClockKey, t)
-    first(fire_changes(rm.m, st, key, Float64(t), _model_draws(rm, key, st)))
+function ClockGradients.clock_distribution(
+    rm::ReplayModel, θ::AbstractVector, key::ClockKey, st::QueueState
+)
+    return clock_distribution(rm.m, θ, key, st)
 end
 
-ClockGradients.fire_changes(rm::ReplayModel, st::QueueState, key::ClockKey, t) =
-    (ClockGradients.fire(rm, st, key, t), nothing)
+function ClockGradients.fire(rm::ReplayModel, st::QueueState, key::ClockKey, t)
+    return first(fire_changes(rm.m, st, key, Float64(t), _model_draws(rm, key, st)))
+end
 
-ClockGradients.states_equal(rm::ReplayModel, a::QueueState, b::QueueState) =
-    states_equal(a, b)
+function ClockGradients.fire_changes(rm::ReplayModel, st::QueueState, key::ClockKey, t)
+    return (ClockGradients.fire(rm, st, key, t), nothing)
+end
+
+ClockGradients.states_equal(rm::ReplayModel, a::QueueState, b::QueueState) = states_equal(a, b)
 
 # SharedRemaining's invlogccdf delegates to the base law's invlogccdf plus
 # arithmetic, so pathwise duals flow through it exactly when they flow
@@ -88,7 +95,6 @@ ClockGradients._dual_safe(d::SharedRemaining) = ClockGradients._dual_safe(d.base
 
 # The framework-record ingestion seam: the bare-trace constructor rebuilds
 # back-references and retained uniforms by walking this very contract.
-ClockGradients.gradient_record(rm::ReplayModel, rec::MarkedRecord,
-                               θ0::AbstractVector) =
-    ClockGradients.GradientRecord(rm, θ0, rec.key, rec.time, rec.horizon;
-                                  coupling = :redraw)
+function ClockGradients.gradient_record(rm::ReplayModel, rec::MarkedRecord, θ0::AbstractVector)
+    return ClockGradients.GradientRecord(rm, θ0, rec.key, rec.time, rec.horizon; coupling=:redraw)
+end

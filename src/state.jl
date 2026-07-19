@@ -66,13 +66,37 @@ end
 
 """
     initial_state(m::QueueGSMP) -> QueueState
+    initial_state(m::QueueGSMP, ds::DrawSource) -> QueueState
 
-The state at time zero: no jobs anywhere, and one arrival clock enabled per
-source with enabling time `0.0`. One of the five contract functions
+The state at time zero, with one arrival clock enabled per source (enabling
+time `0.0`) and the network's [`populate!`](@ref) population seeded: each
+entry's jobs are filed into their station's buffer in declaration order,
+one settle pass at t = 0 dispatches them into service, and every enabled
+clock gets enabling time `0.0`. One of the five contract functions
 (`initial_state`, [`enabled`](@ref), [`clock_distribution`](@ref),
 [`fire_changes`](@ref), [`states_equal`](@ref)).
+
+Seeding may consume draws — initial marks, and any draw the t = 0 dispatch
+makes (a [`SIRO`](@ref) pick, say) — which flow through `ds`, keyed by the
+reserved pseudo-clock `(:init, 0, 0)`; [`simulate`](@ref) records them as
+the record's `init` list and [`replay`](@ref) reads them back. The
+one-argument form works when no draw is needed; a model whose population
+carries mark laws must be seeded through a draw source and errors here,
+pointing at the record's `init` draws.
 """
 function initial_state(m::QueueGSMP)
+    isempty(m.population) && return _empty_state(m)
+    any(p -> p.mark !== nothing, m.population) && throw(
+        ArgumentError(
+            "initial_state(m) has no draw source to draw the population's " *
+            "initial marks; seed from a record's init draws instead: " *
+            "initial_state(m, replaydraws((:init, Int32(0), Int64(0)), rec.init, m.params))",
+        ),
+    )
+    return initial_state(m, replaydraws(INIT_KEY, DrawList(), m.params))
+end
+
+function _empty_state(m::QueueGSMP)
     n = length(m.stations)
     st = QueueState(
         0.0,

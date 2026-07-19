@@ -30,16 +30,29 @@ rec = simulate(m, [1.0, 2.0], 2000.0; seed = 7)
 time_average(number_in_system, m, rec)    # near ρ/(1-ρ) = 1
 ```
 """
-function simulate(m::QueueGSMP, θ::AbstractVector, horizon::Real;
-                  seed::Integer=0, method=nothing, worklist::Symbol=:fifo,
-                  debug::Bool=false, keep_states::Bool=false)
+function simulate(
+    m::QueueGSMP,
+    θ::AbstractVector,
+    horizon::Real;
+    seed::Integer=0,
+    method=nothing,
+    worklist::Symbol=:fifo,
+    debug::Bool=false,
+    keep_states::Bool=false,
+)
     rng = Xoshiro(seed)
     ctx = SamplingContext(SamplerBuilder(ClockKey, Float64; method), rng)
     # Auxiliary draws get their own keyed streams, independent of the clock
     # streams, so adding a mark to a model never perturbs its firing times.
     streams = CompetingClocks.KeyedStreams{StreamKey}(rand(rng, UInt64))
-    st = initial_state(m)
+    # "Firing 0": seeding the population may draw initial marks and t = 0
+    # dispatch picks; they flow through the same conduit as every other
+    # draw, keyed by the reserved (:init, 0, 0) pseudo-clock, and land in
+    # the record's init list for replay.
+    ds0 = livedraws(streams, INIT_KEY, m.params, θ)
+    st = initial_state(m, ds0)
     rec = MarkedRecord()
+    rec.init = ds0.consumed
     states = QueueState[]
     keep_states && push!(states, st)
     for k in enabled(m, st)
@@ -57,7 +70,7 @@ function simulate(m::QueueGSMP, θ::AbstractVector, horizon::Real;
         debug && check_membership(m, st, ctx)
     end
     rec.horizon = Float64(horizon)
-    keep_states ? (rec, states) : rec
+    return keep_states ? (rec, states) : rec
 end
 
 # D1's sampler-facing half, shared by the interpreter and the branchable
@@ -71,11 +84,10 @@ function apply_deltas!(ctx, m::QueueGSMP, θ, st::QueueState, deltas, t::Float64
         else
             dist = clock_distribution(m, θ, k, st)
             shift = st.te[k] - t
-            op == :enable ? enable!(ctx, k, dist, shift) :
-                            reenable!(ctx, k, dist, shift)
+            op == :enable ? enable!(ctx, k, dist, shift) : reenable!(ctx, k, dist, shift)
         end
     end
-    nothing
+    return nothing
 end
 
 # F11's membership half: the recompute is the specification, the deltas are
@@ -83,8 +95,9 @@ end
 function check_membership(m::QueueGSMP, st::QueueState, ctx)
     want = Set(enabled(m, st))
     have = Set(collect(CompetingClocks.enabled(ctx)))
-    want == have ||
-        error("delta drift: model enables $(collect(setdiff(want, have))), " *
-              "sampler holds extra $(collect(setdiff(have, want)))")
-    nothing
+    want == have || error(
+        "delta drift: model enables $(collect(setdiff(want, have))), " *
+        "sampler holds extra $(collect(setdiff(have, want)))",
+    )
+    return nothing
 end

@@ -58,6 +58,21 @@ function _assert_thetafree_marks(m::QueueGSMP)
             )
         end
     end
+    # Population mark laws are mark laws; a θ-reading initial mark would add
+    # the same unimplemented derivative term as a θ-reading source mark.
+    for p in m.population
+        p.mark === nothing && continue
+        for (name, law) in p.mark.laws
+            ps = reads_params(law)
+            isempty(ps) || throw(
+                ArgumentError(
+                    "branchable worlds support θ-free marks only for now; initial " *
+                    "mark $name of the population at $(m.stations[p.station].name) " *
+                    "reads parameters $(sort!(collect(ps)))",
+                ),
+            )
+        end
+    end
     return nothing
 end
 
