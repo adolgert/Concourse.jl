@@ -79,6 +79,16 @@ score estimator remains valid on racing records. The
 [racing and cancellation section](https://computingkitchen.com/Concourse.jl/dev/queues/richer_stations/#Racing-and-cancellation)
 covers the two cancellation policies and their exact trigger semantics.
 
+Cyclic blocking topologies run under `compile`'s
+`allow_blocking_cycles = true` (by default a cycle of finite `:block`
+buffers is rejected at compile time), and a run that actually wedges raises
+a typed `BlockingDeadlock` naming the cycle, with the partial record
+attached so the deadlock replays deterministically. Deadlock *resolution* —
+simultaneous exchange and its relatives — is unsupported. The
+[cycles section](https://computingkitchen.com/Concourse.jl/dev/queues/richer_stations/#Cycles)
+covers what deadlock means under blocking-after-service and why resolution
+is out of scope.
+
 ## Documentation
 
 The [documentation](https://computingkitchen.com/Concourse.jl/dev/) has a

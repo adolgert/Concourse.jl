@@ -671,8 +671,8 @@ order, with stations as indices; [`initial_state`](@ref) seeds them.
 
 `allow_blocking_cycles` records that [`compile`](@ref) was asked to skip
 check C3: the topology may contain a cycle of finite `:block` buffers, and
-[`deposit!`](@ref) watches for a realized deadlock at runtime, raising
-[`BlockingDeadlock`](@ref).
+the interpreter's deposit step watches for a realized deadlock at runtime,
+raising [`BlockingDeadlock`](@ref).
 """
 struct QueueGSMP
     stations::Vector{CompiledStation}
