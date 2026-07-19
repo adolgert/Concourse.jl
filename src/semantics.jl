@@ -478,6 +478,7 @@ function deposit!(
                 push!(st.hold[origin], j)
                 push!(st.blocked[d], (Int32(origin), j))
                 push!(touched, origin)
+                m.allow_blocking_cycles && _deadlock_check(m, st, origin, d, j)
             else
                 delete!(st.jobs, j)
                 # A dropped sibling resolves like a sunk one: clear its
@@ -493,6 +494,66 @@ function deposit!(
     else
         error("cannot route into $(stn.kind) station $(stn.name)")
     end
+end
+
+# Runtime deadlock detection under compile's allow_blocking_cycles: the
+# wait-for graph is implied by st.blocked — station p waits on q when some
+# (p, j) ∈ blocked[q], and that edge is REALIZED (the held job has already
+# routed; its single chosen destination is the edge, so a Probabilistic
+# kernel contributes exactly one edge per held job). When deposit! adds the
+# edge origin → d, DFS from d through the existing edges; reaching origin
+# closes a cycle. Every station on the cycle is then full and holding, and a
+# held job's destination is already chosen, so no event can free space on
+# the cycle — a genuine BAS deadlock, raised as BlockingDeadlock with the
+# cycle in routing order. Cost: one pass over all blocked entries per new
+# block edge, bounded by the total number of servers.
+function _deadlock_check(m::QueueGSMP, st::QueueState, origin::Int, d::Int, j::JobId)
+    if d == origin
+        # A self-loop: the station blocks on itself.
+        throw(BlockingDeadlock([m.stations[origin].name], st.time, JobId[j], nothing))
+    end
+    # Transient adjacency over realized edges: p → (q, held job at p).
+    adj = Dict{Int,Vector{Tuple{Int,JobId}}}()
+    for q in eachindex(st.blocked), (p, jb) in st.blocked[q]
+        push!(get!(adj, Int(p), Tuple{Int,JobId}[]), (q, jb))
+    end
+    # parent[v] = (u, jb): DFS reached v along the edge u → v whose held
+    # job at u is jb. d has no parent; its incoming edge is the new one.
+    parent = Dict{Int,Tuple{Int,JobId}}()
+    seen = Set{Int}([d])
+    stack = Int[d]
+    while !isempty(stack)
+        p = pop!(stack)
+        for (q, jb) in get(adj, p, Tuple{Int,JobId}[])
+            if q == origin
+                # Reconstruct the cycle origin → d → … → p → origin,
+                # collecting each station's held job along its outgoing edge.
+                path = Tuple{Int,JobId}[(p, jb)]
+                node = p
+                while node != d
+                    u, ju = parent[node]
+                    push!(path, (u, ju))
+                    node = u
+                end
+                reverse!(path)                # now [(d, …), …, (p, jb)]
+                cycle = [m.stations[origin].name]
+                jobs = JobId[j]
+                for (s, held) in path
+                    push!(cycle, m.stations[s].name)
+                    push!(jobs, held)
+                end
+                throw(BlockingDeadlock(cycle, st.time, jobs, nothing))
+            end
+            if !(q in seen)
+                push!(seen, q)
+                parent[q] = (p, jb)
+                push!(stack, q)
+            end
+        end
+    end
+    # A station that is waited on but holds nothing itself has no outgoing
+    # edge and can still drain — the DFS dead-ends there, correctly.
+    return nothing
 end
 
 # Cancel one sibling: remove it from wherever it sits — a buffer, a server
@@ -765,8 +826,14 @@ end
 _pick_unblock!(::FCFSUnblock, queue::Vector{Tuple{Int32,JobId}}) = popfirst!(queue)
 
 # F9's claim is that FIFO and LIFO reach the same fixed point because
-# contention lives in UnblockPolicy, not in this order. The fuel bound turns a
-# blocking cycle (excluded statically by C3) into an error instead of a hang.
+# contention lives in UnblockPolicy, not in this order. The claim survives
+# cyclic blocking topologies (compile's allow_blocking_cycles): unblocking
+# picks by FCFSUnblock from a per-destination queue, so freed waiting room
+# admits the longest-blocked transfer regardless of which cascade order freed
+# it — the order can only change WHEN a settle runs, never which blocked
+# transfer wins the room. The fuel bound turns a blocking cycle (excluded
+# statically by C3 unless allow_blocking_cycles, which detects a realized
+# deadlock precisely in deposit!) into an error instead of a hang.
 function run_cascade!(
     m::QueueGSMP,
     st::QueueState,
@@ -782,7 +849,11 @@ function run_cascade!(
         push!(touched, q)
         settle!(m, st, q, t, draws, wl, touched)
         fuel -= 1
-        fuel >= 0 || error("settle cascade did not reach a fixed point")
+        fuel >= 0 || error(
+            "settle cascade did not reach a fixed point; if this network has a " *
+            "blocking cycle, compile with allow_blocking_cycles = true to get a " *
+            "precise BlockingDeadlock error",
+        )
     end
     return nothing
 end

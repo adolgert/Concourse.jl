@@ -41,6 +41,48 @@ function push_firing!(r::MarkedRecord, key::ClockKey, t::Float64, draws::DrawLis
 end
 
 """
+    BlockingDeadlock
+
+The runtime error a model compiled with `allow_blocking_cycles = true`
+raises when a cycle of full `:block` buffers actually wedges (see
+[`compile`](@ref)). Fields:
+
+- `cycle`: the station names in routing order, starting from the station
+  whose blocked transfer closed the cycle; each holds a job routed to the
+  next (the last back to the first).
+- `time`: the wall time of the firing whose settle cascade formed the cycle.
+- `jobs`: the held job ids, one per cycle station, aligned with `cycle`.
+- `record`: the [`MarkedRecord`](@ref) up to and including the firing that
+  deadlocked, when thrown from [`simulate`](@ref); `nothing` when thrown
+  from a bare [`fire_changes`](@ref). A deadlock is a state property, so
+  [`replay`](@ref) of the record reproduces the trajectory and re-raises
+  the same error at the same firing.
+"""
+struct BlockingDeadlock <: Exception
+    cycle::Vector{Symbol}
+    time::Float64
+    jobs::Vector{JobId}
+    record::Union{MarkedRecord,Nothing}
+end
+
+function Base.showerror(io::IO, e::BlockingDeadlock)
+    ring = join((string(s) for s in e.cycle), " → ")
+    return print(
+        io,
+        "blocking deadlock at t = ",
+        e.time,
+        ": ",
+        ring,
+        " → ",
+        e.cycle[1],
+        "; every station on the cycle is full and holds a job routed to the next ",
+        "(held jobs ",
+        e.jobs,
+        "); deadlock resolution is unsupported — see allow_blocking_cycles",
+    )
+end
+
+"""
     replay(m, rec; worklist=:fifo) -> Vector{QueueState}
 
 The state trajectory as a fold of `fire_changes` over the record, including

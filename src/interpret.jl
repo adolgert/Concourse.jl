@@ -63,7 +63,21 @@ function simulate(
         (key === nothing || t > horizon) && break
         fire!(ctx, key, t)
         ds = livedraws(streams, key, m.params, θ)
-        st, deltas = fire_changes(m, st, key, t, ds; worklist)
+        st, deltas = try
+            fire_changes(m, st, key, t, ds; worklist)
+        catch e
+            if e isa BlockingDeadlock
+                # A deadlock ends the run mid-cascade. The draws consumed
+                # before the throw are deterministic, so appending the
+                # throwing firing leaves a record whose replay reproduces
+                # the trajectory and re-raises the same error at the same
+                # firing. Rethrow with the record attached.
+                push_firing!(rec, key, t, ds.consumed)
+                rec.horizon = t
+                throw(BlockingDeadlock(e.cycle, e.time, e.jobs, rec))
+            end
+            rethrow()
+        end
         push_firing!(rec, key, t, ds.consumed)
         keep_states && push!(states, st)
         apply_deltas!(ctx, m, θ, st, deltas, t)
