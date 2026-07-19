@@ -191,10 +191,19 @@ struct FCFSUnblock <: UnblockPolicy end
 
 Batch-service policy for [`station!`](@ref): a free server waits until at
 least `min` jobs are in the buffer, then gathers up to `max` of them (in
-discipline order) into one batch served by a single clock. The batch
-carries the mark `batchsize`, so the service law may read
-`Mark(:batchsize)`. On completion, members route individually. Requires
-the [`FCFS`](@ref) discipline (check C6).
+discipline order) into one batch served by a single clock. The batch is a
+synthetic job carrying the mark `batchsize`, frozen at enabling like any
+mark, so the service law may read `Mark(:batchsize)`. Members waiting for
+a batch to form keep their patience clocks; the batch job itself never
+gets one. On completion each member routes individually on its own marks
+and draws; a member that meets a full `:block` destination is dropped
+like a source arrival, because the batch's firing already freed the
+server — nothing is left to hold the member. Requires the [`FCFS`](@ref)
+discipline (check C6).
+
+The defaults `min = 1, max = typemax(Int)` are the gather-everything rule
+(dynamic batching); `min = max = K` is classical fixed-size batch service
+(M/M``^{[K]}``/1).
 """
 struct Batching
     min::Int
@@ -302,7 +311,7 @@ end
 """
     station!(net, name::Symbol; service, discipline=FCFS(), servers=1,
              capacity=typemax(Int), overflow=:drop, unblock=FCFSUnblock(),
-             patience=nothing, renege_to=nothing)
+             patience=nothing, renege_to=nothing, batching=nothing)
 
 Add a service station called `name` to the network.
 
@@ -331,6 +340,13 @@ Add a service station called `name` to the network.
 - `patience` and `renege_to` come together. `patience` is a law for how
   long a job will wait before abandoning the line, and `renege_to` names
   the station the abandoning job goes to. Jobs in service do not renege.
+- `batching`: a [`Batching`](@ref) policy, or `nothing` (the default) for
+  one job per server. Under batching, a free server gathers between
+  `min` and `max` waiting jobs (in discipline order) into one batch
+  served by a single clock; the batch carries the mark `batchsize` for
+  the service law to read, and on completion the members route
+  individually. Batching requires the [`FCFS`](@ref) discipline
+  (check C6).
 
 A station needs a [`route!`](@ref) saying where finished jobs go.
 """
@@ -576,7 +592,9 @@ first violation:
   deadlock;
 - station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is read only by
   the service law of a station, and every occupancy read names a declared
-  station (check C5).
+  station (check C5);
+- every station that declares [`Batching`](@ref) uses the non-preemptive
+  FCFS discipline (check C6).
 """
 function compile(net::QueueNetwork)
     names = Dict{Symbol,Int}(s.name => i for (i, s) in enumerate(net.stations))

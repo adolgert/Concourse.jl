@@ -61,6 +61,15 @@ estimator remains valid on their records. The
 [state-dependent service laws page](https://computingkitchen.com/Concourse.jl/dev/manual/state_dependent/)
 explains the segment convention and keeps the estimator-validity table.
 
+Batch service (`Batching`) carries a milder caveat in the same family:
+the batch size is integer-valued, so pathwise IPA is not guaranteed
+unbiased — a perturbation that changes which jobs are gathered moves the
+path by whole jobs. The score estimator remains valid on batch records.
+The
+[batch service page](https://computingkitchen.com/Concourse.jl/dev/manual/batching/)
+covers the semantics, including that a batch member meeting a full
+`:block` destination is dropped.
+
 ## Documentation
 
 The [documentation](https://computingkitchen.com/Concourse.jl/dev/) has a

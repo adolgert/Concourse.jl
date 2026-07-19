@@ -78,16 +78,17 @@ function time_average(g::Function, m::QueueGSMP, rec::MarkedRecord)
     return acc / rec.horizon
 end
 
-"""
-    number_in_system(st::QueueState) -> Int
-
-The number of jobs in the system: every live job, whether waiting, in
-service, held blocked, or stashed at a join. Pass it to
-[`time_average`](@ref) to estimate L, the time-average number in system.
-"""
 # Batch members stay in st.jobs while their synthetic batch job (also in
 # st.jobs, one per batchmembers entry) is in service; counting both would
 # double-count. The batch job is bookkeeping, the members are the real jobs,
 # so subtract one per live batch.
+"""
+    number_in_system(st::QueueState) -> Int
+
+The number of jobs in the system: every live job, whether waiting, in
+service, held blocked, or stashed at a join — and the *members* of a
+batch, never the synthetic batch job itself. Pass it to
+[`time_average`](@ref) to estimate L, the time-average number in system.
+"""
 number_in_system(st::QueueState) = length(st.jobs) - length(st.batchmembers)
 number_at(q::Int) = st::QueueState -> length(st.buf[q]) + length(st.srv[q]) + length(st.hold[q])
