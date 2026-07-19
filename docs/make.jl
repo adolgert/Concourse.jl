@@ -38,6 +38,7 @@ makedocs(
             "manual/rounds.md",
             "manual/closed_networks.md",
             "manual/bcmp_hpc.md",
+            "manual/yang_llm_mg1.md",
         ],
         "Reference" => [
             "reference/surface.md",
