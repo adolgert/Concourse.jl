@@ -8,7 +8,7 @@
 # harness, the check messages verbatim, and chained rounds at sustained
 # overload staying inside the cascade fuel bound. The paper-reproduction
 # tests (Dai Fig. 8, Theorem 2, vertex C, Rybko–Stolyar, Dong's
-# decoupling oracle) build on these and live with the examples.
+# decoupling oracle) build on these and live in test_rounds_papers.jl.
 
 using Distributions: Dirac
 

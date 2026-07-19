@@ -249,6 +249,99 @@ function round_md1(; s=0.5, budget=1)
     return compile(net)
 end
 
+# Dong & Cao's synthetic three-class system (arXiv:2604.11001 §4.1): classes
+# (l, o) = (10, 20), (10, 40), (10, 60), each arriving as an independent
+# Poisson process at rate λ (the paper's Poisson-per-slot arrivals: a
+# continuous-time Poisson stream binned by the unit slots gives i.i.d.
+# Poisson(λ) counts per slot), served by Algorithm 1's per-class activation
+# budgets b on a single decode phase — one token per active request per
+# unit slot, prefill costs memory but zero time, no memory check.
+function dong_three_class(; b=(4, 4, 4))
+    net = QueueNetwork(; param_names=(:lambda,))
+    for (k, ok) in enumerate((20.0, 40.0, 60.0))
+        source!(
+            net,
+            Symbol(:arrive, k);
+            interarrival=Law(:Exponential; scale=inv(Param(:lambda))),
+            mark=MarkLaw(;
+                class=Law(:Dirac; value=Const(Float64(k))),
+                l=Law(:Dirac; value=Const(10.0)),
+                o=Law(:Dirac; value=Const(ok)),
+            ),
+        )
+        route!(net, Symbol(:arrive, k), Always(:gpu))
+    end
+    station!(
+        net,
+        :gpu;
+        rounds=Rounds(;
+            policy=ClassBudgets(b; class=:class), duration=Law(:Dirac; value=Const(1.0)), work=(:o,)
+        ),
+    )
+    sink!(net, :done)
+    route!(net, :gpu, Always(:done))
+    return compile(net)
+end
+
+# Dai et al.'s Rybko–Stolyar network of two LLM servers (arXiv:2504.07347
+# §5.4), joining capabilities 6 and 7: type A (class = 1) takes hop 1 at :s1
+# with sizes ~ (Poisson(32), Poisson(32)) and hop 2 at :s2 with
+# (Poisson(512), Poisson(32)); type B (class = 2) flows the reverse way. The
+# remark at each server redraws the hop's sizes on deposit — mean prefill
+# -448 + 480·class at :s1 and 992 - 480·class at :s2 puts the long prefill
+# on each type's SECOND hop. Both servers run mixed decode-priority FCFS
+# (Sarathi) with b_max = 768 and t_b ≡ 1 under a non-preemptive class
+# priority: :destabilizing gives each server priority to the class EXITING
+# through it (s1 favors B, s2 favors A), the paper's unstable configuration;
+# :stabilizing reverses it. λ per type: ρ = 0.9 is λ = 0.9·768/608.
+function rybko_stolyar(; budget=768, priorities=:destabilizing)
+    priorities in (:destabilizing, :stabilizing) ||
+        throw(ArgumentError("priorities must be :destabilizing or :stabilizing"))
+    o1, o2 = priorities === :destabilizing ? ([2.0, 1.0], [1.0, 2.0]) : ([1.0, 2.0], [2.0, 1.0])
+    net = QueueNetwork(; param_names=(:lambda,))
+    for (nm, cls) in ((:arrive_a, 1.0), (:arrive_b, 2.0))
+        source!(
+            net,
+            nm;
+            interarrival=Law(:Exponential; scale=inv(Param(:lambda))),
+            mark=MarkLaw(; class=Law(:Dirac; value=Const(cls))),
+        )
+    end
+    dur = Law(:Dirac; value=Const(1.0))
+    station!(
+        net,
+        :s1;
+        remark=(
+            v_p=Law(:Poisson; lambda=Const(-448.0) + Const(480.0) * Mark(:class)),
+            v_d=Law(:Poisson; lambda=Const(32.0)),
+        ),
+        rounds=Rounds(;
+            policy=ClassPriority(Sarathi(; budget); by=:class, order=o1),
+            duration=dur,
+            work=(:v_p, :v_d),
+        ),
+    )
+    station!(
+        net,
+        :s2;
+        remark=(
+            v_p=Law(:Poisson; lambda=Const(992.0) + Const(-480.0) * Mark(:class)),
+            v_d=Law(:Poisson; lambda=Const(32.0)),
+        ),
+        rounds=Rounds(;
+            policy=ClassPriority(Sarathi(; budget); by=:class, order=o2),
+            duration=dur,
+            work=(:v_p, :v_d),
+        ),
+    )
+    sink!(net, :done)
+    route!(net, :arrive_a, Always(:s1))
+    route!(net, :arrive_b, Always(:s2))
+    route!(net, :s1, ByMark(Mark(:class), [1.5], [:s2, :done]))
+    route!(net, :s2, ByMark(Mark(:class), [1.5], [:done, :s1]))
+    return compile(net)
+end
+
 # CONCOURSE_TEST_QUICK=1 shrinks replication counts for fast local iteration.
 const QUICK = get(ENV, "CONCOURSE_TEST_QUICK", "0") == "1"
 nreps(n) = QUICK ? max(4, n ÷ 8) : n

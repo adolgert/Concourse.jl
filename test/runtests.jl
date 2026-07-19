@@ -33,6 +33,7 @@ for file in [
     "test_closed.jl",
     "test_remark.jl",
     "test_rounds.jl",
+    "test_rounds_papers.jl",
     "test_quality.jl",
 ]
     path = joinpath(@__DIR__, file)
