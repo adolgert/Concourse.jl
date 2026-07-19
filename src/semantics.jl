@@ -229,6 +229,17 @@ function derive_deltas!(
             bset = Set(b)
             for k in a
                 (k in bset || k == fired) && continue
+                if k[3] != JobId(0) && !haskey(new.jobs, k[3])
+                    # The clock's job was canceled or absorbed out of
+                    # existence this firing: nothing is banked for a job
+                    # that cannot return, and any earlier residue goes with
+                    # it — a canceled clock is as clean as a fired one.
+                    delete!(new.te, k)
+                    delete!(new.bank, k)
+                    delete!(new.anchor, k)
+                    push!(deltas, (:disable, k))
+                    continue
+                end
                 if family_memory(Val(fam), m, k) == :resume
                     # Bank from the last anchor, not from te: a clock the
                     # re-evaluation pass has touched already banked its
@@ -382,38 +393,82 @@ function deposit!(
     stn = m.stations[d]
     if stn.kind == :sink
         delete!(st.jobs, j)      # the departure remains visible in the record
+        g = get(st.group, j, JobId(0))
         delete!(st.group, j)
+        # A sunk sibling needs no cancellation; drop it from its group's
+        # roster so a roster whose group never merges still empties out.
+        g != JobId(0) && _prune_member!(st, g, j)
     elseif stn.kind == :fork
         # Instantaneous split: one sibling per branch, sharing the parent's
         # id as group id. Clock-free, so no family entry is needed — which is
-        # itself part of charter claim F7.
-        for b in stn.branches
+        # itself part of charter claim F7. The whole roster is minted and
+        # recorded before any sibling is deposited: a sibling reaching a
+        # need-1 canceling join mid-loop cancels the rest of the roster, so
+        # each deposit first checks its sibling is still alive.
+        sibs = JobId[]
+        for _ in stn.branches
             sib = st.next_id
             st.next_id += 1
             st.jobs[sib] = st.jobs[j]
             st.group[sib] = j
-            deposit!(m, st, d, Int(b), sib, wl, touched, draws)
+            push!(sibs, sib)
         end
+        st.members[j] = sibs
         delete!(st.jobs, j)
+        for (i, b) in enumerate(stn.branches)
+            haskey(st.jobs, sibs[i]) || continue
+            deposit!(m, st, d, Int(b), sibs[i], wl, touched, draws)
+        end
     elseif stn.kind == :join
         # Instantaneous synchronization: stash the sibling (it stays a job in
         # the system — a group's sojourn ends only at the merge); release one
-        # merged job through the join's route when all parts have arrived.
+        # merged job through the join's route when `need` siblings have
+        # arrived (`need == parts` unless the join cancels, check C7).
         g = get(st.group, j, JobId(0))
         g == 0 && error("job $j reached join $(stn.name) without a fork group")
-        sibs = get!(st.pending[d], g, JobId[])
-        push!(sibs, j)
-        if length(sibs) == stn.parts
-            merged = st.next_id
-            st.next_id += 1
-            st.jobs[merged] = st.jobs[j]
-            for sib in sibs
-                delete!(st.jobs, sib)
-                delete!(st.group, sib)
+        if stn.cancel != :none && !haskey(st.members, g) && !haskey(st.pending[d], g)
+            # The group already resolved at this canceling join: a late
+            # finisher — an in-service survivor under :on_start, or the
+            # merged product of a nested fork whose parent was canceled.
+            # Absorb it silently, like a sink; its work stays in the record.
+            delete!(st.jobs, j)
+            delete!(st.group, j)
+        else
+            sibs = get!(st.pending[d], g, JobId[])
+            push!(sibs, j)
+            if length(sibs) == stn.need
+                merged = st.next_id
+                st.next_id += 1
+                st.jobs[merged] = st.jobs[j]
+                # Nested forks: the merged job inherits the fork parent's
+                # own group entry, so it can still reach an outer join.
+                haskey(st.group, g) && (st.group[merged] = st.group[g])
+                for sib in sibs
+                    delete!(st.jobs, sib)
+                    delete!(st.group, sib)
+                end
+                delete!(st.pending[d], g)
+                if stn.cancel == :on_completion
+                    # The race is decided: every sibling of the group not
+                    # among the arrived is canceled wherever it sits. The
+                    # roster comes out of `members` first so the recursive
+                    # walk never mutates what it iterates.
+                    roster = get(st.members, g, JobId[])
+                    delete!(st.members, g)
+                    delete!(st.started, g)
+                    arrived = Set(sibs)
+                    for x in roster
+                        x in arrived && continue
+                        cancel_job!(m, st, x, wl, touched)
+                    end
+                else
+                    delete!(st.members, g)
+                    delete!(st.started, g)
+                end
+                delete!(st.group, g)
+                d2 = routejob!(m, st, d, merged, draws)
+                deposit!(m, st, d, d2, merged, wl, touched, draws)
             end
-            delete!(st.pending[d], g)
-            d2 = routejob!(m, st, d, merged, draws)
-            deposit!(m, st, d, d2, merged, wl, touched, draws)
         end
     elseif stn.kind == :station
         if length(st.buf[d]) >= stn.capacity
@@ -425,6 +480,11 @@ function deposit!(
                 push!(touched, origin)
             else
                 delete!(st.jobs, j)
+                # A dropped sibling resolves like a sunk one: clear its
+                # group entry and its slot in the roster.
+                g = get(st.group, j, JobId(0))
+                delete!(st.group, j)
+                g != JobId(0) && _prune_member!(st, g, j)
             end
         else
             file_into_buffer!(m, st, d, j)
@@ -433,6 +493,144 @@ function deposit!(
     else
         error("cannot route into $(stn.kind) station $(stn.name)")
     end
+end
+
+# Cancel one sibling: remove it from wherever it sits — a buffer, a server
+# slot, a hold/blocked pair, a join stash, or a forming batch — and delete it
+# from jobs/group. A sibling that already forked (a dead interior node of the
+# group forest) cancels its own recorded descendants first, recursively.
+# Every station a removal touches joins the worklist and the touched set, so
+# freed slots refill, freed waiting room unblocks, and the derived deltas
+# disable the removed clocks (I2). Cancellation is deterministic given the
+# state — it consumes no draws (I1) — and is a no-op for a job already gone.
+function cancel_job!(m::QueueGSMP, st::QueueState, x::JobId, wl::Vector{Int}, touched::Set{Int})
+    if haskey(st.members, x)
+        kids = st.members[x]
+        delete!(st.members, x)
+        delete!(st.started, x)
+        for k in kids
+            cancel_job!(m, st, k, wl, touched)
+        end
+    end
+    found = false
+    for s in eachindex(m.stations)
+        i = findfirst(==(x), st.buf[s])
+        if i !== nothing
+            deleteat!(st.buf[s], i)
+            # A previously preempted :resume clock banked its age while the
+            # job waited; the job is gone, so the residue goes with it.
+            k = (:service, Int32(s), x)
+            delete!(st.bank, k)
+            delete!(st.anchor, k)
+            push!(wl, s)
+            push!(touched, s)
+            found = true
+            break
+        end
+        i = findfirst(==(x), st.srv[s])
+        if i !== nothing
+            deleteat!(st.srv[s], i)
+            push!(wl, s)
+            push!(touched, s)
+            found = true
+            break
+        end
+    end
+    if !found
+        # Blocked: the (origin, x) entry in the destination's blocked queue
+        # is paired with x in the origin's hold — both go, and both stations
+        # re-settle (the origin's server frees, the destination's queue may
+        # admit another transfer).
+        for dq in eachindex(st.blocked)
+            i = findfirst(p -> p[2] == x, st.blocked[dq])
+            i === nothing && continue
+            o = Int(st.blocked[dq][i][1])
+            deleteat!(st.blocked[dq], i)
+            _remove!(st.hold[o], x)
+            push!(wl, o)
+            push!(wl, dq)
+            push!(touched, o)
+            push!(touched, dq)
+            found = true
+            break
+        end
+    end
+    if !found
+        # Stashed at a join, waiting for siblings that now never come.
+        for dq in eachindex(st.pending)
+            for (g2, v) in st.pending[dq]
+                i = findfirst(==(x), v)
+                i === nothing && continue
+                deleteat!(v, i)
+                isempty(v) && delete!(st.pending[dq], g2)
+                found = true
+                break
+            end
+            found && break
+        end
+    end
+    if !found
+        # Gathered into a forming batch: drop it from the roster; the batch
+        # clock runs on with its frozen batchsize mark.
+        for (_, v) in st.batchmembers
+            i = findfirst(==(x), v)
+            i === nothing && continue
+            deleteat!(v, i)
+            break
+        end
+    end
+    delete!(st.jobs, x)
+    delete!(st.group, x)
+    return nothing
+end
+
+# A resolved sibling (it reached a sink) needs no cancellation: drop it from
+# its group's roster so a roster whose group never merges — branches that end
+# in sinks — still empties and is reclaimed. An emptied fork parent resolves
+# like a sunk sibling, recursively (nested forks).
+function _prune_member!(st::QueueState, g::JobId, j::JobId)
+    v = get(st.members, g, nothing)
+    v === nothing && return nothing
+    i = findfirst(==(j), v)
+    i === nothing || deleteat!(v, i)
+    if isempty(v)
+        delete!(st.members, g)
+        delete!(st.started, g)
+        gg = get(st.group, g, JobId(0))
+        delete!(st.group, g)
+        gg != JobId(0) && _prune_member!(st, gg, g)
+    end
+    return nothing
+end
+
+# Cancel-on-start (redundancy-d): when the need-th sibling of a group racing
+# toward a `cancel = :on_start` join enters service, siblings still waiting
+# in buffers are canceled; jobs already in service run to completion, and the
+# join merges the first `need` arrivals. Which join a group races toward is
+# compile-time knowledge — the station where the job starts carries the
+# join's index (`cancel_join`, unambiguous by check C9). The counter is per
+# group and counts service entries, so the intended pairing is single-hop,
+# non-preemptive branch stations: a re-dispatched preempted sibling or a
+# multi-hop branch counts more than once.
+function maybe_cancel_started!(
+    m::QueueGSMP, st::QueueState, q::Int, j::JobId, wl::Vector{Int}, touched::Set{Int}
+)
+    jn = Int(m.stations[q].cancel_join)
+    jn == 0 && return nothing
+    m.stations[jn].cancel == :on_start || return nothing
+    g = get(st.group, j, JobId(0))
+    g == JobId(0) && return nothing
+    roster = get(st.members, g, nothing)
+    roster === nothing && return nothing     # the group already resolved
+    n = get(st.started, g, 0) + 1
+    st.started[g] = n
+    n == m.stations[jn].need || return nothing
+    for x in copy(roster)
+        x == j && continue
+        any(s -> x in st.buf[s], eachindex(m.stations)) || continue
+        cancel_job!(m, st, x, wl, touched)
+    end
+    return nothing
 end
 
 function file_into_buffer!(m::QueueGSMP, st::QueueState, q::Int, j::JobId)
@@ -534,6 +732,7 @@ function settle!(
             j = selectjob!(m, st, q, draws)
             j === nothing && break
             push!(st.srv[q], j)
+            maybe_cancel_started!(m, st, q, j, wl, touched)
         end
     else
         while _freeslots(m, st, q) > 0 && length(st.buf[q]) >= b.min

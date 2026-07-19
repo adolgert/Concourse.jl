@@ -229,6 +229,8 @@ struct SurfaceStation
     renege_to::Union{Symbol,Nothing}
     branches::Vector{Symbol}              # forks only
     parts::Int                            # joins only
+    need::Int                             # joins only: siblings that trigger the merge
+    cancel::Symbol                        # joins only: :none | :on_completion | :on_start
     batching::Union{Batching,Nothing}     # stations only
 end
 
@@ -303,6 +305,8 @@ function source!(
             nothing,
             Symbol[],
             0,
+            0,
+            :none,
             nothing,
         ),
     )
@@ -381,6 +385,8 @@ function station!(
             renege_to,
             Symbol[],
             0,
+            0,
+            :none,
             batching,
         ),
     )
@@ -410,6 +416,8 @@ function sink!(net::QueueNetwork, name::Symbol)
             nothing,
             Symbol[],
             0,
+            0,
+            :none,
             nothing,
         ),
     )
@@ -447,23 +455,62 @@ function fork!(net::QueueNetwork, name::Symbol; branches)
             nothing,
             collect(Symbol, branches),
             0,
+            0,
+            :none,
             nothing,
         ),
     )
 end
 
 """
-    join!(net, name::Symbol; parts::Int)
+    join!(net, name::Symbol; parts::Int, need::Int = parts, cancel::Symbol = :none)
 
 Add a join called `name` to the network. Siblings of the same fork group
-are stashed as they arrive. When `parts` siblings have arrived, they merge
-into one job, which leaves through the join's [`route!`](@ref). `parts`
-must be at least 2 and usually equals the branch count of the matching
-[`fork!`](@ref). Joins take no time and hold no clock; stashed siblings
-still count as jobs in the system.
+are stashed as they arrive. When `need` of the group's `parts` siblings
+have arrived, they merge into one job, which leaves through the join's
+[`route!`](@ref). `parts` must be at least 2 and usually equals the branch
+count of the matching [`fork!`](@ref). Joins take no time and hold no
+clock; stashed siblings still count as jobs in the system.
+
+`need < parts` is (n, k) redundancy: the group's siblings race, and
+`cancel` says what happens to the rest.
+
+- `cancel = :on_completion`: when the `need`-th sibling arrives, the merge
+  happens and every other sibling of the group is canceled wherever it is
+  — waiting, in service, held blocked, or stashed — freeing its server or
+  waiting-room slot. A sibling that has itself forked cancels its
+  descendants recursively.
+- `cancel = :on_start`: when the `need`-th sibling of a group *enters
+  service*, siblings still waiting in buffers are canceled; jobs already
+  in service run to completion. The join merges the first `need` arrivals
+  and silently absorbs any later ones.
+- `cancel = :none` (the default) requires `need == parts`: a join that
+  merges at `need` but never cancels would strand the remaining siblings
+  (check C7).
+
+Cancellation is deterministic given the state — it consumes no draws, and
+the canceled work stays visible in the record.
 """
-function join!(net::QueueNetwork, name::Symbol; parts::Int)
+function join!(net::QueueNetwork, name::Symbol; parts::Int, need::Int=parts, cancel::Symbol=:none)
     parts >= 2 || throw(ArgumentError("a join needs at least two parts"))
+    1 <= need <= parts || throw(
+        ArgumentError("join $name needs 1 <= need <= parts, got need = $need with parts = $parts"),
+    )
+    cancel in (:none, :on_completion, :on_start) || throw(
+        ArgumentError(
+            "join $name: cancel must be :none, :on_completion, or :on_start, got $cancel"
+        ),
+    )
+    need < parts &&
+        cancel == :none &&
+        throw(
+            ArgumentError(
+                "join $name waits for need = $need of parts = $parts siblings but " *
+                "cancel = :none; a join that merges at need and never cancels would " *
+                "strand the remaining siblings — set cancel = :on_completion or " *
+                ":on_start (check C7)",
+            ),
+        )
     return _addstation!(
         net,
         SurfaceStation(
@@ -480,6 +527,8 @@ function join!(net::QueueNetwork, name::Symbol; parts::Int)
             nothing,
             Symbol[],
             parts,
+            need,
+            cancel,
             nothing,
         ),
     )
@@ -525,6 +574,13 @@ struct CompiledStation
     renege::Int32             # destination index; 0 when no patience law
     branches::Vector{Int32}   # forks only
     parts::Int                # joins only
+    need::Int                 # joins only: arrivals that trigger the merge
+    cancel::Symbol            # joins only: :none | :on_completion | :on_start
+    # The canceling join this station races toward, or 0. Set on a tracked
+    # fork and on every station strictly between it and its canceling join —
+    # check C9 makes those stations exclusive to the fork's branch paths, so
+    # the stamp is unambiguous and the runtime needs no group-to-join map.
+    cancel_join::Int32
     batching::Union{Batching,Nothing}   # stations only
 end
 
@@ -594,16 +650,23 @@ first violation:
   the service law of a station, and every occupancy read names a declared
   station (check C5);
 - every station that declares [`Batching`](@ref) uses the non-preemptive
-  FCFS discipline (check C6).
+  FCFS discipline (check C6);
+- a fork's siblings can reach at most one canceling join, so which join
+  triggers a group's cancellation is unambiguous (check C8);
+- every station on a tracked branch — strictly between a fork and its
+  canceling join — receives sibling traffic only (check C9).
 """
 function compile(net::QueueNetwork)
     names = Dict{Symbol,Int}(s.name => i for (i, s) in enumerate(net.stations))
     params = Dict{Symbol,Int}(p => i for (i, p) in enumerate(net.param_names))
     check_network(net, names, params)
+    cancelmap = check_cancellation(net, names)
     stations = CompiledStation[]
     for s in net.stations
         routing = s.kind in (:sink, :fork) ? nothing : _compilekernel(net.routes[s.name], names)
         renege = s.renege_to === nothing ? Int32(0) : Int32(names[s.renege_to])
+        cjname = get(cancelmap, s.name, nothing)
+        cj = cjname === nothing ? Int32(0) : Int32(names[cjname])
         push!(
             stations,
             CompiledStation(
@@ -621,6 +684,9 @@ function compile(net::QueueNetwork)
                 renege,
                 Int32[names[b] for b in s.branches],
                 s.parts,
+                s.need,
+                s.cancel,
+                cj,
                 s.batching,
             ),
         )
@@ -802,6 +868,94 @@ function check_batching(net::QueueNetwork)
         end
     end
     return nothing
+end
+
+# Checks C8 and C9: cancellation coherence, by reachability over the surface
+# graph (the check_blocking_acyclic precedent). A fork is "tracked" when its
+# siblings can reach a canceling join (`cancel != :none`); the walk goes
+# fork → branches, routed station → kernel destinations, sink → nothing, and
+# it does not walk past a canceling join, which consumes the group.
+#
+# C8: a fork whose branches can reach two different canceling joins has an
+# ambiguous cancellation trigger — error. C9: every station strictly between
+# a tracked fork and its canceling join must receive traffic only from
+# within those branch paths (routes, fork branches, and renege destinations
+# from outside all count as traffic), so a leftover sibling at the join is
+# unambiguous. Returns the stamp map — the tracked fork and each of its
+# interior stations, mapped to the canceling join's name — which compile
+# stores as `cancel_join`, sparing the runtime any group-to-join lookup.
+function check_cancellation(net::QueueNetwork, names)
+    byname = Dict(s.name => s for s in net.stations)
+    stamps = Dict{Symbol,Symbol}()
+    for f in net.stations
+        f.kind == :fork || continue
+        joins = Symbol[]
+        interior = Set{Symbol}()
+        seen = Set{Symbol}()
+        stack = Symbol[b for b in f.branches]
+        while !isempty(stack)
+            v = pop!(stack)
+            v in seen && continue
+            push!(seen, v)
+            sv = byname[v]
+            if sv.kind == :join && sv.cancel != :none
+                push!(joins, v)
+                continue
+            end
+            push!(interior, v)
+            if sv.kind == :fork
+                append!(stack, sv.branches)
+            elseif haskey(net.routes, v)
+                for d in _kerneldests(net.routes[v])
+                    push!(stack, d)
+                end
+            end
+        end
+        if length(joins) > 1
+            throw(
+                ArgumentError(
+                    "fork $(f.name) can reach two canceling joins, $(joins[1]) and " *
+                    "$(joins[2]); which join triggers a group's cancellation would " *
+                    "be ambiguous (check C8)",
+                ),
+            )
+        end
+        isempty(joins) && continue
+        J = joins[1]
+        inside = union(interior, Set((f.name,)))
+        for u in net.stations
+            u.name in inside && continue
+            dests = Symbol[]
+            u.kind == :fork && append!(dests, u.branches)
+            u.kind == :fork ||
+                !haskey(net.routes, u.name) ||
+                append!(dests, collect(_kerneldests(net.routes[u.name])))
+            u.renege_to === nothing || push!(dests, u.renege_to)
+            for dnm in dests
+                dnm in interior && throw(
+                    ArgumentError(
+                        "station $(u.name) routes into $dnm, which lies on a tracked " *
+                        "branch between fork $(f.name) and canceling join $J; a " *
+                        "station on a tracked branch may not also receive non-sibling " *
+                        "traffic, so leftover-sibling handling stays unambiguous " *
+                        "(check C9)",
+                    ),
+                )
+            end
+        end
+        for u in Iterators.flatten(((f.name,), interior))
+            prev = get(stamps, u, J)
+            prev == J || throw(
+                ArgumentError(
+                    "station $u lies on tracked branches of two different canceling " *
+                    "joins, $prev and $J; which join triggers cancellation there " *
+                    "would be ambiguous (check C8)",
+                ),
+            )
+            stamps[u] = J
+        end
+    end
+    return stamps
 end
 
 _kerneldests(k::Always) = (k.dest,)
