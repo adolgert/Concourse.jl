@@ -98,28 +98,109 @@ end
 Base.min(a::ScalarExpr, b::ScalarExpr) = Apply(:min, ScalarExpr[a, b])
 Base.max(a::ScalarExpr, b::ScalarExpr) = Apply(:max, ScalarExpr[a, b])
 
+"""
+    AbstractStateView
+
+What a law is allowed to see of the queue state at evaluation time. Laws
+never receive the full `QueueState`; they receive a view, so the signature
+of `evalexpr` and `builddist` documents exactly what a law may read. The concrete views are [`StateView`](@ref), which exposes
+per-station occupancy counts, and [`NoState`](@ref), the sentinel for
+evaluation contexts where reading state is not permitted.
+"""
+abstract type AbstractStateView end
+
+"""
+    StateView(srv, buf, index)
+
+A read-only view of station occupancies: `srv` and `buf` are the
+per-station in-service and in-buffer job vectors (borrowed from the live
+`QueueState`, not copied), and `index` maps a station name to its station
+id. Laws reach it only through [`inservice_count`](@ref) and
+[`inbuffer_count`](@ref), so a law can count jobs but cannot identify or
+mutate them.
+"""
+struct StateView{T<:AbstractVector} <: AbstractStateView
+    srv::Vector{T}
+    buf::Vector{T}
+    index::Dict{Symbol,Int}
+end
+
+"""
+    NoState()
+
+The sentinel state view for evaluation contexts where a law may not read
+station state (mark draws, routing expressions, static stability checks).
+Its accessors throw, so a state-reading law used in a state-blind context
+fails loudly instead of reading stale or meaningless occupancies. The
+shared singleton is `NOSTATE`.
+"""
+struct NoState <: AbstractStateView end
+
+const NOSTATE = NoState()
+
+"""
+    inservice_count(sv::AbstractStateView, station::Symbol) -> Float64
+
+The number of jobs in service at `station` under the view `sv`. Throws for
+[`NoState`](@ref).
+"""
+inservice_count(sv::StateView, station::Symbol) = Float64(length(sv.srv[_station_id(sv, station)]))
+
+"""
+    inbuffer_count(sv::AbstractStateView, station::Symbol) -> Float64
+
+The number of jobs waiting in the buffer at `station` under the view `sv`.
+Throws for [`NoState`](@ref).
+"""
+inbuffer_count(sv::StateView, station::Symbol) = Float64(length(sv.buf[_station_id(sv, station)]))
+
+function _station_id(sv::StateView, station::Symbol)
+    id = get(sv.index, station, 0)
+    id == 0 && error("no station named $station in the state view")
+    return id
+end
+
+function inservice_count(::NoState, station::Symbol)
+    return error("this law may not read station state (evaluated without a state view)")
+end
+function inbuffer_count(::NoState, station::Symbol)
+    return error("this law may not read station state (evaluated without a state view)")
+end
+
 const _OPS = Dict{Symbol,Function}(
-    :+ => +, :- => -, :* => *, :/ => /,
-    :inv => inv, :log => log, :exp => exp, :sqrt => sqrt,
-    :min => min, :max => max,
+    :+ => +,
+    :- => -,
+    :* => *,
+    :/ => /,
+    :inv => inv,
+    :log => log,
+    :exp => exp,
+    :sqrt => sqrt,
+    :min => min,
+    :max => max,
 )
 
 # `params` maps a Param name to its index in the θ vector; built at compile
 # time so evaluation never searches. The return type follows eltype(θ) so a
-# Dual-valued θ flows through untouched (the ClockGradients seam).
-function evalexpr(e::Param, params::Dict{Symbol,Int}, θ, marks::NamedTuple, te)
-    θ[params[e.name]]
+# Dual-valued θ flows through untouched (the ClockGradients seam). `sv` is
+# the state view the law may read (NOSTATE where reading state is illegal).
+function evalexpr(
+    e::Param, params::Dict{Symbol,Int}, θ, marks::NamedTuple, te, sv::AbstractStateView
+)
+    return θ[params[e.name]]
 end
-evalexpr(e::Mark, params, θ, marks::NamedTuple, te) = getfield(marks, e.name)
-evalexpr(::Enab, params, θ, marks, te) = te
-evalexpr(e::Const, params, θ, marks, te) = e.value
-function evalexpr(e::Apply, params, θ, marks, te)
+evalexpr(e::Mark, params, θ, marks::NamedTuple, te, sv::AbstractStateView) = getfield(marks, e.name)
+evalexpr(::Enab, params, θ, marks, te, sv::AbstractStateView) = te
+evalexpr(e::Const, params, θ, marks, te, sv::AbstractStateView) = e.value
+function evalexpr(e::Apply, params, θ, marks, te, sv::AbstractStateView)
     f = _OPS[e.op]
     if length(e.args) == 1
-        f(evalexpr(e.args[1], params, θ, marks, te))
+        f(evalexpr(e.args[1], params, θ, marks, te, sv))
     else
-        f(evalexpr(e.args[1], params, θ, marks, te),
-          evalexpr(e.args[2], params, θ, marks, te))
+        f(
+            evalexpr(e.args[1], params, θ, marks, te, sv),
+            evalexpr(e.args[2], params, θ, marks, te, sv),
+        )
     end
 end
 
@@ -212,7 +293,7 @@ struct Law <: AbstractLaw
 end
 
 function Law(family::Symbol; kwargs...)
-    Law(family, Pair{Symbol,ScalarExpr}[k => asexpr(v) for (k, v) in kwargs])
+    return Law(family, Pair{Symbol,ScalarExpr}[k => asexpr(v) for (k, v) in kwargs])
 end
 
 """
@@ -241,18 +322,24 @@ struct Opaque <: AbstractLaw
 end
 
 function Opaque(f::Function; params=Symbol[], marks=Symbol[], time=false)
-    Opaque(f, collect(Symbol, params), collect(Symbol, marks), time)
+    return Opaque(f, collect(Symbol, params), collect(Symbol, marks), time)
 end
 
-function builddist(law::Law, params::Dict{Symbol,Int}, θ, marks::NamedTuple, te)
+function builddist(
+    law::Law, params::Dict{Symbol,Int}, θ, marks::NamedTuple, te, sv::AbstractStateView
+)
     ctor = getfield(Distributions, law.family)
-    vals = (evalexpr(a.second, params, θ, marks, te) for a in law.args)
-    ctor(vals...)
+    vals = (evalexpr(a.second, params, θ, marks, te, sv) for a in law.args)
+    return ctor(vals...)
 end
 
-function builddist(law::Opaque, params::Dict{Symbol,Int}, θ, marks::NamedTuple, te)
+# Opaque stays state-blind: the user callback keeps the (θnamed, marks, te)
+# signature, so `sv` stops here.
+function builddist(
+    law::Opaque, params::Dict{Symbol,Int}, θ, marks::NamedTuple, te, sv::AbstractStateView
+)
     named = NamedTuple{Tuple(law.params)}(Tuple(θ[params[p]] for p in law.params))
-    law.f(named, marks, te)
+    return law.f(named, marks, te)
 end
 
 reads_params(l::Law) = union(Set{Symbol}(), (reads_params(a.second) for a in l.args)...)

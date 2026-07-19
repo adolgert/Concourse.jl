@@ -40,7 +40,7 @@ source's `consumed` list, which the interpreter stores as the firing's
 draw record.
 """
 function livedraws(streams, firing::ClockKey, params, θ)
-    DrawSource(streams, firing, params, θ, DrawList(), nothing, 0)
+    return DrawSource(streams, firing, params, θ, DrawList(), nothing, 0)
 end
 
 """
@@ -51,7 +51,7 @@ are answered from `recorded` in order, checking that each request's
 purpose matches what was recorded. No RNG, no θ.
 """
 function replaydraws(firing::ClockKey, recorded::DrawList, params)
-    DrawSource(nothing, firing, params, nothing, DrawList(), recorded, 0)
+    return DrawSource(nothing, firing, params, nothing, DrawList(), recorded, 0)
 end
 
 """
@@ -67,9 +67,8 @@ function _next_recorded(ds::DrawSource, purpose::Symbol)
     ds.ri <= length(replay) ||
         error("replay of $(ds.firing) asked for draw $purpose beyond the record")
     p = replay[ds.ri]
-    p.first == purpose ||
-        error("replay of $(ds.firing) wanted $(p.first), fire asked for $purpose")
-    p.second
+    p.first == purpose || error("replay of $(ds.firing) wanted $(p.first), fire asked for $purpose")
+    return p.second
 end
 
 """
@@ -89,7 +88,7 @@ function draw!(ds::DrawSource, purpose::Symbol, dist)
     rng = CompetingClocks.stream_for!(streams, (ds.firing, purpose))
     v = Float64(rand(rng, dist))
     push!(ds.consumed, purpose => v)
-    v
+    return v
 end
 
 """
@@ -99,17 +98,16 @@ A mark draw: the value of mark `name` under `law`, given the marks drawn
 so far and the enabling time `te`. Only the live side evaluates the law,
 so θ never enters replay.
 """
-function drawmark!(ds::DrawSource, name::Symbol, law::AbstractLaw,
-                   marks::NamedTuple, te::Float64)
+function drawmark!(ds::DrawSource, name::Symbol, law::AbstractLaw, marks::NamedTuple, te::Float64)
     ds.replay === nothing || return _next_recorded(ds, name)
     # Live sources carry streams and θ; replay returned above, so θ never
     # enters this evaluation path with `nothing`.
-    dist = builddist(law, ds.params, ds.θ::AbstractVector, marks, te)
+    dist = builddist(law, ds.params, ds.θ::AbstractVector, marks, te, NOSTATE)
     streams = ds.streams::CompetingClocks.KeyedStreams{StreamKey}
     rng = CompetingClocks.stream_for!(streams, (ds.firing, name))
     v = Float64(rand(rng, dist))
     push!(ds.consumed, name => v)
-    v
+    return v
 end
 
 """
@@ -125,5 +123,5 @@ function drawmarks!(ds::DrawSource, ml::Union{MarkLaw,Nothing}, te::Float64)
         v = drawmark!(ds, name, law, marks, te)
         marks = merge(marks, NamedTuple{(name,)}((v,)))
     end
-    marks
+    return marks
 end

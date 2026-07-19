@@ -65,7 +65,7 @@ station!(net, :cpu;
 ```
 """
 function Priority(by::ScalarExpr; preempt::Bool=false, memory::Symbol=:resume)
-    Discipline(:priority, :ordered, by, :front, preempt, memory)
+    return Discipline(:priority, :ordered, by, :front, preempt, memory)
 end
 
 # Shortest remaining processing time: the ordering key is size MINUS the
@@ -152,8 +152,9 @@ struct Probabilistic <: Kernel
     dests::Vector{Symbol}
     probs::Vector{Float64}
 end
-Probabilistic(pairs::Pair{Symbol,<:Real}...) =
-    Probabilistic(Symbol[p.first for p in pairs], Float64[p.second for p in pairs])
+function Probabilistic(pairs::Pair{Symbol,<:Real}...)
+    return Probabilistic(Symbol[p.first for p in pairs], Float64[p.second for p in pairs])
+end
 
 """
     RoundRobin(dests::Vector{Symbol})
@@ -224,14 +225,15 @@ mutable struct QueueNetwork
     stations::Vector{SurfaceStation}
     routes::Dict{Symbol,Kernel}
 end
-QueueNetwork(; param_names) = QueueNetwork(collect(Symbol, param_names),
-                                           SurfaceStation[], Dict{Symbol,Kernel}())
+function QueueNetwork(; param_names)
+    return QueueNetwork(collect(Symbol, param_names), SurfaceStation[], Dict{Symbol,Kernel}())
+end
 
 function _addstation!(net::QueueNetwork, s::SurfaceStation)
     any(x -> x.name == s.name, net.stations) &&
         throw(ArgumentError("duplicate station name $(s.name)"))
     push!(net.stations, s)
-    s
+    return s
 end
 
 """
@@ -248,11 +250,27 @@ Add an arrival stream called `name` to the network.
 
 A source needs a [`route!`](@ref) saying where its arrivals go.
 """
-function source!(net::QueueNetwork, name::Symbol;
-                 interarrival::AbstractLaw, mark::Union{MarkLaw,Nothing}=nothing)
-    _addstation!(net, SurfaceStation(name, :source, FCFS(), 0, 0, :drop,
-                                     FCFSUnblock(), interarrival, mark,
-                                     nothing, nothing, Symbol[], 0))
+function source!(
+    net::QueueNetwork, name::Symbol; interarrival::AbstractLaw, mark::Union{MarkLaw,Nothing}=nothing
+)
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :source,
+            FCFS(),
+            0,
+            0,
+            :drop,
+            FCFSUnblock(),
+            interarrival,
+            mark,
+            nothing,
+            nothing,
+            Symbol[],
+            0,
+        ),
+    )
 end
 
 """
@@ -285,17 +303,38 @@ Add a service station called `name` to the network.
 
 A station needs a [`route!`](@ref) saying where finished jobs go.
 """
-function station!(net::QueueNetwork, name::Symbol;
-                  discipline::Discipline=FCFS(), servers::Int=1,
-                  service::AbstractLaw, capacity::Int=typemax(Int),
-                  overflow::Symbol=:drop, unblock::UnblockPolicy=FCFSUnblock(),
-                  patience::Union{AbstractLaw,Nothing}=nothing,
-                  renege_to::Union{Symbol,Nothing}=nothing)
+function station!(
+    net::QueueNetwork,
+    name::Symbol;
+    discipline::Discipline=FCFS(),
+    servers::Int=1,
+    service::AbstractLaw,
+    capacity::Int=typemax(Int),
+    overflow::Symbol=:drop,
+    unblock::UnblockPolicy=FCFSUnblock(),
+    patience::Union{AbstractLaw,Nothing}=nothing,
+    renege_to::Union{Symbol,Nothing}=nothing,
+)
     (patience === nothing) == (renege_to === nothing) ||
         throw(ArgumentError("patience and renege_to come together"))
-    _addstation!(net, SurfaceStation(name, :station, discipline, servers,
-                                     capacity, overflow, unblock, service,
-                                     nothing, patience, renege_to, Symbol[], 0))
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :station,
+            discipline,
+            servers,
+            capacity,
+            overflow,
+            unblock,
+            service,
+            nothing,
+            patience,
+            renege_to,
+            Symbol[],
+            0,
+        ),
+    )
 end
 
 """
@@ -306,9 +345,24 @@ leaves the system and is deleted from the state; its history stays visible
 in the record. A sink cannot have a [`route!`](@ref).
 """
 function sink!(net::QueueNetwork, name::Symbol)
-    _addstation!(net, SurfaceStation(name, :sink, FCFS(), 0, 0, :drop,
-                                     FCFSUnblock(), nothing, nothing,
-                                     nothing, nothing, Symbol[], 0))
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :sink,
+            FCFS(),
+            0,
+            0,
+            :drop,
+            FCFSUnblock(),
+            nothing,
+            nothing,
+            nothing,
+            nothing,
+            Symbol[],
+            0,
+        ),
+    )
 end
 
 # A fork is clock-free: depositing a job splits it into one sibling per
@@ -327,9 +381,24 @@ branches, so it cannot have a [`route!`](@ref). Pair it with a
 """
 function fork!(net::QueueNetwork, name::Symbol; branches)
     length(branches) >= 2 || throw(ArgumentError("a fork needs at least two branches"))
-    _addstation!(net, SurfaceStation(name, :fork, FCFS(), 0, 0, :drop,
-                                     FCFSUnblock(), nothing, nothing, nothing,
-                                     nothing, collect(Symbol, branches), 0))
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :fork,
+            FCFS(),
+            0,
+            0,
+            :drop,
+            FCFSUnblock(),
+            nothing,
+            nothing,
+            nothing,
+            nothing,
+            collect(Symbol, branches),
+            0,
+        ),
+    )
 end
 
 """
@@ -344,9 +413,24 @@ still count as jobs in the system.
 """
 function join!(net::QueueNetwork, name::Symbol; parts::Int)
     parts >= 2 || throw(ArgumentError("a join needs at least two parts"))
-    _addstation!(net, SurfaceStation(name, :join, FCFS(), 0, 0, :drop,
-                                     FCFSUnblock(), nothing, nothing, nothing,
-                                     nothing, Symbol[], parts))
+    return _addstation!(
+        net,
+        SurfaceStation(
+            name,
+            :join,
+            FCFS(),
+            0,
+            0,
+            :drop,
+            FCFSUnblock(),
+            nothing,
+            nothing,
+            nothing,
+            nothing,
+            Symbol[],
+            parts,
+        ),
+    )
 end
 
 """
@@ -359,7 +443,7 @@ route; sinks and forks take none. [`compile`](@ref) checks this.
 """
 function route!(net::QueueNetwork, origin::Symbol, kernel::Kernel)
     net.routes[origin] = kernel
-    net
+    return net
 end
 
 # ---------------------------------------------------------------------------
@@ -408,23 +492,24 @@ struct QueueGSMP
 end
 
 function _compilekernel(k::Always, names)
-    CompiledKernel(:always, Int32[names[k.dest]], nothing, Float64[], Float64[])
+    return CompiledKernel(:always, Int32[names[k.dest]], nothing, Float64[], Float64[])
 end
 function _compilekernel(k::ByMark, names)
     length(k.dests) == length(k.cutoffs) + 1 ||
         throw(ArgumentError("ByMark needs one more destination than cutoffs"))
-    CompiledKernel(:bymark, Int32[names[d] for d in k.dests], k.expr,
-                   k.cutoffs, Float64[])
+    return CompiledKernel(:bymark, Int32[names[d] for d in k.dests], k.expr, k.cutoffs, Float64[])
 end
 function _compilekernel(k::Probabilistic, names)
     isapprox(sum(k.probs), 1.0; atol=1e-9) ||
         throw(ArgumentError("Probabilistic routing probabilities must sum to 1"))
-    CompiledKernel(:probabilistic, Int32[names[d] for d in k.dests], nothing,
-                   Float64[], k.probs)
+    return CompiledKernel(
+        :probabilistic, Int32[names[d] for d in k.dests], nothing, Float64[], k.probs
+    )
 end
 function _compilekernel(k::RoundRobin, names)
-    CompiledKernel(:roundrobin, Int32[names[d] for d in k.dests], nothing,
-                   Float64[], Float64[])
+    return CompiledKernel(
+        :roundrobin, Int32[names[d] for d in k.dests], nothing, Float64[], Float64[]
+    )
 end
 
 """
@@ -450,17 +535,29 @@ function compile(net::QueueNetwork)
     check_network(net, names, params)
     stations = CompiledStation[]
     for s in net.stations
-        routing = s.kind in (:sink, :fork) ? nothing :
-                  _compilekernel(net.routes[s.name], names)
+        routing = s.kind in (:sink, :fork) ? nothing : _compilekernel(net.routes[s.name], names)
         renege = s.renege_to === nothing ? Int32(0) : Int32(names[s.renege_to])
-        push!(stations, CompiledStation(s.name, s.kind, s.discipline, s.servers,
-                                        s.capacity, s.overflow, s.unblock,
-                                        s.service, routing, s.mark,
-                                        s.patience, renege,
-                                        Int32[names[b] for b in s.branches],
-                                        s.parts))
+        push!(
+            stations,
+            CompiledStation(
+                s.name,
+                s.kind,
+                s.discipline,
+                s.servers,
+                s.capacity,
+                s.overflow,
+                s.unblock,
+                s.service,
+                routing,
+                s.mark,
+                s.patience,
+                renege,
+                Int32[names[b] for b in s.branches],
+                s.parts,
+            ),
+        )
     end
-    QueueGSMP(stations, names, params)
+    return QueueGSMP(stations, names, params)
 end
 
 # Check C1 (structure) and the parts of C2 (mark dataflow) and the randomness
@@ -477,16 +574,14 @@ function check_network(net::QueueNetwork, names, params)
                     throw(ArgumentError("fork $(s.name) branches to unknown station $b"))
             end
         elseif s.kind != :sink
-            haskey(net.routes, s.name) ||
-                throw(ArgumentError("station $(s.name) has no route!"))
+            haskey(net.routes, s.name) || throw(ArgumentError("station $(s.name) has no route!"))
             k = net.routes[s.name]
             for d in _kerneldests(k)
                 haskey(names, d) ||
                     throw(ArgumentError("route from $(s.name) targets unknown station $d"))
             end
         else
-            haskey(net.routes, s.name) &&
-                throw(ArgumentError("sink $(s.name) cannot have a route"))
+            haskey(net.routes, s.name) && throw(ArgumentError("sink $(s.name) cannot have a route"))
         end
         s.mark !== nothing && union!(produced_marks, marknames(s.mark))
     end
@@ -499,7 +594,8 @@ function check_network(net::QueueNetwork, names, params)
     end
     check_blocking_acyclic(net)
     for s in net.stations
-        s.renege_to === nothing || haskey(names, s.renege_to) ||
+        s.renege_to === nothing ||
+            haskey(names, s.renege_to) ||
             throw(ArgumentError("renege_to at $(s.name) targets unknown station $(s.renege_to)"))
         laws = AbstractLaw[]
         s.service === nothing || push!(laws, s.service)
@@ -517,7 +613,7 @@ function check_network(net::QueueNetwork, names, params)
             end
         end
     end
-    nothing
+    return nothing
 end
 
 _kerneldests(k::Always) = (k.dest,)
@@ -530,8 +626,7 @@ _kerneldests(k::RoundRobin) = Tuple(k.dests)
 # precondition under which the settle cascade's termination argument (F6)
 # holds — so it is an error, not a warning.
 function check_blocking_acyclic(net::QueueNetwork)
-    canblock(s) = s.kind == :station && s.overflow == :block &&
-                  s.capacity != typemax(Int)
+    canblock(s) = s.kind == :station && s.overflow == :block && s.capacity != typemax(Int)
     byname = Dict(s.name => s for s in net.stations)
     edges = Dict{Symbol,Vector{Symbol}}()
     for (origin, k) in net.routes
@@ -540,22 +635,25 @@ function check_blocking_acyclic(net::QueueNetwork)
     end
     seen = Dict{Symbol,Symbol}()   # :active during DFS, :done after
     function visit(v)
-        get(seen, v, :new) == :done && return
-        seen[v] == :active &&
-            throw(ArgumentError("blocking cycle through $v: a cycle of full " *
-                                ":block buffers is deadlock (check C3)"))
+        get(seen, v, :new) == :done && return nothing
+        seen[v] == :active && throw(
+            ArgumentError(
+                "blocking cycle through $v: a cycle of full " *
+                ":block buffers is deadlock (check C3)",
+            ),
+        )
         seen[v] = :active
         for w in get(edges, v, Symbol[])
             haskey(seen, w) || (seen[w] = :new)
             visit(w)
         end
-        seen[v] = :done
+        return seen[v] = :done
     end
     for v in keys(edges)
         haskey(seen, v) || (seen[v] = :new)
         visit(v)
     end
-    nothing
+    return nothing
 end
 
 """
@@ -575,7 +673,7 @@ function stability(m::QueueGSMP, θ::AbstractVector)
         svc = stn.service
         svc === nothing && continue
         reads_marks(svc) == Set{Symbol}() || continue
-        λ[s] = 1 / mean(builddist(svc, m.params, θ, NamedTuple(), 0.0))
+        λ[s] = 1 / mean(builddist(svc, m.params, θ, NamedTuple(), 0.0, NOSTATE))
     end
     # Traffic equations λ = inj + Pᵀλ along :always and :probabilistic
     # kernels (ByMark/RoundRobin splits are statically unknown), by fixpoint
@@ -611,10 +709,9 @@ function stability(m::QueueGSMP, θ::AbstractVector)
         svc = stn.service
         svc === nothing && continue
         reads_marks(svc) == Set{Symbol}() || continue
-        ρ = λ[s] * mean(builddist(svc, m.params, θ, NamedTuple(), 0.0)) /
-            stn.servers
+        ρ = λ[s] * mean(builddist(svc, m.params, θ, NamedTuple(), 0.0, NOSTATE)) / stn.servers
         push!(out, (stn.name, ρ))
         ρ >= 1 && @warn "station $(stn.name) is unstable at this θ" ρ
     end
-    out
+    return out
 end

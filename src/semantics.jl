@@ -28,19 +28,19 @@ function enabled(m::QueueGSMP, st::QueueState)
     for fam in CLOCK_FAMILIES, s in eachindex(m.stations)
         family_station_keys!(ks, Val(fam), m, st, s)
     end
-    ks
+    return ks
 end
 
 function family_station_keys!(ks, ::Val{:arrival}, m::QueueGSMP, st::QueueState, s::Int)
     m.stations[s].kind == :source && push!(ks, (:arrival, Int32(s), JobId(0)))
-    nothing
+    return nothing
 end
 
 function family_station_keys!(ks, ::Val{:service}, m::QueueGSMP, st::QueueState, s::Int)
     for j in st.srv[s]
         push!(ks, (:service, Int32(s), j))
     end
-    nothing
+    return nothing
 end
 
 # Reneging: a patience clock per WAITING job, at stations that declare a
@@ -50,7 +50,7 @@ function family_station_keys!(ks, ::Val{:patience}, m::QueueGSMP, st::QueueState
     for j in st.buf[s]
         push!(ks, (:patience, Int32(s), j))
     end
-    nothing
+    return nothing
 end
 
 """
@@ -67,16 +67,16 @@ The result's element type follows `eltype(θ)`, so a dual-number-valued `θ`
 flows through untouched — the seam ClockGradients.jl differentiates
 through.
 """
-function clock_distribution(m::QueueGSMP, θ::AbstractVector, key::ClockKey,
-                            st::QueueState)
-    family_law(Val(key[1]), m, θ, key, st)
+function clock_distribution(m::QueueGSMP, θ::AbstractVector, key::ClockKey, st::QueueState)
+    return family_law(Val(key[1]), m, θ, key, st)
 end
 
 function family_law(::Val{:arrival}, m, θ, key, st)
     # An :arrival clock exists only for a source, and every source is
     # compiled with its interarrival law in the service slot.
-    builddist(m.stations[key[2]].service::AbstractLaw, m.params, θ, NamedTuple(),
-              st.te[key])
+    return builddist(
+        m.stations[key[2]].service::AbstractLaw, m.params, θ, NamedTuple(), st.te[key], NOSTATE
+    )
 end
 
 # The wall-time law of a shared job, anchored at the ORIGINAL te: given
@@ -99,7 +99,7 @@ _sr_x(d::SharedRemaining, x) = d.age + d.speed * (x - d.shift)
 function Distributions.logccdf(d::SharedRemaining, x::Real)
     norm = logccdf(d.base, d.age)
     x <= d.shift && return zero(norm)
-    logccdf(d.base, _sr_x(d, x)) - norm
+    return logccdf(d.base, _sr_x(d, x)) - norm
 end
 Distributions.ccdf(d::SharedRemaining, x::Real) = exp(logccdf(d, x))
 Distributions.cdf(d::SharedRemaining, x::Real) = -expm1(logccdf(d, x))
@@ -108,12 +108,13 @@ Distributions.logcdf(d::SharedRemaining, x::Real) = log(cdf(d, x))
 function Distributions.logpdf(d::SharedRemaining, x::Real)
     norm = logccdf(d.base, d.age)
     x < d.shift && return oftype(norm, -Inf)
-    log(d.speed) + logpdf(d.base, _sr_x(d, x)) - norm
+    return log(d.speed) + logpdf(d.base, _sr_x(d, x)) - norm
 end
 Distributions.pdf(d::SharedRemaining, x::Real) = exp(logpdf(d, x))
 
-Distributions.invlogccdf(d::SharedRemaining, lp::Real) =
-    d.shift + (invlogccdf(d.base, lp + logccdf(d.base, d.age)) - d.age) / d.speed
+function Distributions.invlogccdf(d::SharedRemaining, lp::Real)
+    return d.shift + (invlogccdf(d.base, lp + logccdf(d.base, d.age)) - d.age) / d.speed
+end
 Distributions.quantile(d::SharedRemaining, q::Real) = invlogccdf(d, log1p(-q))
 Distributions.cquantile(d::SharedRemaining, q::Real) = invlogccdf(d, log(q))
 Base.rand(rng::Random.AbstractRNG, d::SharedRemaining) = invlogccdf(d, -randexp(rng))
@@ -126,7 +127,7 @@ Distributions.partype(d::SharedRemaining) = Distributions.partype(d.base)
 function family_law(::Val{:service}, m, θ, key, st)
     stn = m.stations[key[2]]
     # A :service clock exists only where compile stored a service law.
-    F = builddist(stn.service::AbstractLaw, m.params, θ, st.jobs[key[3]], st.te[key])
+    F = builddist(stn.service::AbstractLaw, m.params, θ, st.jobs[key[3]], st.te[key], NOSTATE)
     stn.discipline.name == :ps || return F
     # Speed changes compile to mid-flight re-evaluations of this value with
     # te fixed — the contract's segment convention, not a te rewrite.
@@ -135,13 +136,14 @@ function family_law(::Val{:service}, m, θ, key, st)
     a = get(st.bank, key, 0.0)
     shift = get(st.anchor, key, st.te[key]) - st.te[key]
     (a == 0.0 && r == 1.0 && shift == 0.0) && return F
-    SharedRemaining(F, a, r, shift)
+    return SharedRemaining(F, a, r, shift)
 end
 
 function family_law(::Val{:patience}, m, θ, key, st)
     # A :patience clock exists only where compile stored a patience law.
-    builddist(m.stations[key[2]].patience::AbstractLaw, m.params, θ, st.jobs[key[3]],
-              st.te[key])
+    return builddist(
+        m.stations[key[2]].patience::AbstractLaw, m.params, θ, st.jobs[key[3]], st.te[key], NOSTATE
+    )
 end
 
 # What a disabled-without-firing clock remembers, per family. The generic
@@ -173,8 +175,14 @@ plumbing. A clock enabled and disabled within one firing never reaches the
 sampler — the GSMP has no zero-duration clocks. Enabling-time and banked-age
 bookkeeping (amendment A1) happens in the same pass, in one place.
 """
-function fire_changes(m::QueueGSMP, st::QueueState, key::ClockKey, t::Float64,
-                      draws::DrawSource; worklist::Symbol=:fifo)
+function fire_changes(
+    m::QueueGSMP,
+    st::QueueState,
+    key::ClockKey,
+    t::Float64,
+    draws::DrawSource;
+    worklist::Symbol=:fifo,
+)
     old = st
     st = copystate(st)
     st.time = t
@@ -185,11 +193,12 @@ function fire_changes(m::QueueGSMP, st::QueueState, key::ClockKey, t::Float64,
     family_fire!(Val(key[1]), m, st, key, t, draws, wl, touched)
     run_cascade!(m, st, t, draws, wl, touched, worklist)
     deltas = derive_deltas!(m, old, st, key, t, touched)
-    st, deltas
+    return st, deltas
 end
 
-function derive_deltas!(m::QueueGSMP, old::QueueState, new::QueueState,
-                        fired::ClockKey, t::Float64, touched::Set{Int})
+function derive_deltas!(
+    m::QueueGSMP, old::QueueState, new::QueueState, fired::ClockKey, t::Float64, touched::Set{Int}
+)
     deltas = ClockDelta[]
     for s in sort!(collect(touched))
         for fam in CLOCK_FAMILIES
@@ -222,7 +231,7 @@ function derive_deltas!(m::QueueGSMP, old::QueueState, new::QueueState,
             family_reenables!(deltas, Val(fam), m, old, new, s, t)
         end
     end
-    deltas
+    return deltas
 end
 
 # The one delta kind membership cannot see (event_loop.tex §2.4): a clock
@@ -232,8 +241,9 @@ family_reenables!(deltas, ::Val, m, old, new, s, t) = nothing
 # Processor sharing: a change in the resident count changes every survivor's
 # speed. Bank the internal age accrued at the old speed, move the anchor to
 # now, leave te alone, and tell the sampler to re-evaluate.
-function family_reenables!(deltas, ::Val{:service}, m::QueueGSMP,
-                           old::QueueState, new::QueueState, s::Int, t::Float64)
+function family_reenables!(
+    deltas, ::Val{:service}, m::QueueGSMP, old::QueueState, new::QueueState, s::Int, t::Float64
+)
     stn = m.stations[s]
     (stn.kind == :station && stn.discipline.name == :ps) || return nothing
     n_old = length(old.srv[s])
@@ -243,12 +253,11 @@ function family_reenables!(deltas, ::Val{:service}, m::QueueGSMP,
     for j in new.srv[s]
         k = (:service, Int32(s), j)
         j in old.srv[s] || continue      # newly admitted: the enable pass owns it
-        new.bank[k] = get(new.bank, k, 0.0) +
-                      r_old * (t - get(new.anchor, k, new.te[k]))
+        new.bank[k] = get(new.bank, k, 0.0) + r_old * (t - get(new.anchor, k, new.te[k]))
         new.anchor[k] = t
         push!(deltas, (:reenable, k))
     end
-    nothing
+    return nothing
 end
 
 function family_fire!(::Val{:arrival}, m, st, key, t, draws, wl, touched)
@@ -258,7 +267,7 @@ function family_fire!(::Val{:arrival}, m, st, key, t, draws, wl, touched)
     st.next_id += 1
     st.jobs[j] = drawmarks!(draws, stn.mark, t)
     d = routejob!(m, st, Int(s), j, draws)
-    deposit!(m, st, Int(s), d, j, wl, touched, draws)
+    return deposit!(m, st, Int(s), d, j, wl, touched, draws)
 end
 
 function family_fire!(::Val{:service}, m, st, key, t, draws, wl, touched)
@@ -266,7 +275,7 @@ function family_fire!(::Val{:service}, m, st, key, t, draws, wl, touched)
     _remove!(st.srv[s], j)
     d = routejob!(m, st, Int(s), j, draws)
     deposit!(m, st, Int(s), d, j, wl, touched, draws)
-    push!(wl, Int(s))
+    return push!(wl, Int(s))
 end
 
 # A patience firing is an abandonment: the job leaves the waiting line for
@@ -276,13 +285,13 @@ function family_fire!(::Val{:patience}, m, st, key, t, draws, wl, touched)
     _, s, j = key
     _remove!(st.buf[s], j)
     deposit!(m, st, Int(s), Int(m.stations[s].renege), j, wl, touched, draws)
-    push!(wl, Int(s))
+    return push!(wl, Int(s))
 end
 
 function _remove!(v::Vector, x)
     i = findfirst(==(x), v)
     i === nothing && error("$x not present")
-    deleteat!(v, i)
+    return deleteat!(v, i)
 end
 
 # ---------------------------------------------------------------------------
@@ -292,13 +301,12 @@ end
 # deterministic route would make the routing decision part of the likelihood,
 # which A4 reserves for recorded draws. compile-time checks enforce it, so
 # evaluation passes θ = nothing and te = 0 safely here.
-function routejob!(m::QueueGSMP, st::QueueState, origin::Int, j::JobId,
-                   draws::DrawSource)
+function routejob!(m::QueueGSMP, st::QueueState, origin::Int, j::JobId, draws::DrawSource)
     k = m.stations[origin].routing
     if k.kind == :always
         Int(k.dests[1])
     elseif k.kind == :bymark
-        v = evalexpr(k.expr, m.params, nothing, st.jobs[j], 0.0)
+        v = evalexpr(k.expr, m.params, nothing, st.jobs[j], 0.0, NOSTATE)
         Int(k.dests[searchsortedfirst(k.cutoffs, v)])
     elseif k.kind == :probabilistic
         u = draw!(draws, :route, Uniform())
@@ -321,8 +329,16 @@ end
 # deposit and the settle cascade — pure state movement; clock lifecycle is
 # derived afterwards from the membership these moves imply.
 
-function deposit!(m::QueueGSMP, st::QueueState, origin::Int, d::Int, j::JobId,
-                  wl::Vector{Int}, touched::Set{Int}, draws::DrawSource)
+function deposit!(
+    m::QueueGSMP,
+    st::QueueState,
+    origin::Int,
+    d::Int,
+    j::JobId,
+    wl::Vector{Int},
+    touched::Set{Int},
+    draws::DrawSource,
+)
     push!(touched, d)
     stn = m.stations[d]
     if stn.kind == :sink
@@ -396,22 +412,27 @@ function file_into_buffer!(m::QueueGSMP, st::QueueState, q::Int, j::JobId)
     end
 end
 
-_byval(m, st, disc::Discipline, j::JobId) =
-    evalexpr(disc.by, m.params, nothing, st.jobs[j], 0.0)
+function _byval(m, st, disc::Discipline, j::JobId)
+    return evalexpr(disc.by, m.params, nothing, st.jobs[j], 0.0, NOSTATE)
+end
 
 function _ordval(m, st, disc::Discipline, q::Int, j::JobId)
     v = _byval(m, st, disc, j)
     disc.name == :srpt || return v
     k = (:service, Int32(q), j)
     haskey(st.te, k) && return v - (st.time - st.te[k])
-    v - get(st.bank, k, 0.0)
+    return v - get(st.bank, k, 0.0)
 end
 
 # Under processor sharing every job is in service; `servers` is the shared
 # capacity in the speed min(1, servers/n), not a slot count.
-_freeslots(m, st, q) =
-    m.stations[q].discipline.name == :ps ? typemax(Int) :
-    m.stations[q].servers - length(st.srv[q]) - length(st.hold[q])
+function _freeslots(m, st, q)
+    return if m.stations[q].discipline.name == :ps
+        typemax(Int)
+    else
+        m.stations[q].servers - length(st.srv[q]) - length(st.hold[q])
+    end
+end
 
 function selectjob!(m::QueueGSMP, st::QueueState, q::Int, draws::DrawSource)
     disc = m.stations[q].discipline
@@ -432,10 +453,17 @@ end
 # One settle pass: preempt, dispatch, unblock. Any pass that changes blocking
 # or slot occupancy re-enqueues the affected stations; run_cascade! iterates
 # to the fixed point.
-function settle!(m::QueueGSMP, st::QueueState, q::Int, t::Float64,
-                 draws::DrawSource, wl::Vector{Int}, touched::Set{Int})
+function settle!(
+    m::QueueGSMP,
+    st::QueueState,
+    q::Int,
+    t::Float64,
+    draws::DrawSource,
+    wl::Vector{Int},
+    touched::Set{Int},
+)
     stn = m.stations[q]
-    stn.kind == :station || return
+    stn.kind == :station || return nothing
     disc = stn.discipline
 
     # 1. Preemption: a strictly better waiting job (lower ordering key) evicts
@@ -470,7 +498,7 @@ function settle!(m::QueueGSMP, st::QueueState, q::Int, t::Float64,
         push!(wl, Int(p))     # the origin's server slot is free again
         push!(touched, Int(p))
     end
-    nothing
+    return nothing
 end
 
 _pick_unblock!(::FCFSUnblock, queue::Vector{Tuple{Int32,JobId}}) = popfirst!(queue)
@@ -478,9 +506,15 @@ _pick_unblock!(::FCFSUnblock, queue::Vector{Tuple{Int32,JobId}}) = popfirst!(que
 # F9's claim is that FIFO and LIFO reach the same fixed point because
 # contention lives in UnblockPolicy, not in this order. The fuel bound turns a
 # blocking cycle (excluded statically by C3) into an error instead of a hang.
-function run_cascade!(m::QueueGSMP, st::QueueState, t::Float64,
-                      draws::DrawSource, wl::Vector{Int}, touched::Set{Int},
-                      order::Symbol)
+function run_cascade!(
+    m::QueueGSMP,
+    st::QueueState,
+    t::Float64,
+    draws::DrawSource,
+    wl::Vector{Int},
+    touched::Set{Int},
+    order::Symbol,
+)
     fuel = 10 * (length(st.jobs) + length(m.stations) + 10)
     while !isempty(wl)
         q = order == :fifo ? popfirst!(wl) : pop!(wl)
@@ -489,5 +523,5 @@ function run_cascade!(m::QueueGSMP, st::QueueState, t::Float64,
         fuel -= 1
         fuel >= 0 || error("settle cascade did not reach a fixed point")
     end
-    nothing
+    return nothing
 end
