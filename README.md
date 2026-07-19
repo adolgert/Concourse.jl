@@ -70,6 +70,14 @@ The
 covers the semantics, including that a batch member meeting a full
 `:block` destination is dropped.
 
+Sibling cancellation (`join!` with `need < parts` and a `cancel` policy)
+carries the same caveat in its sharpest form: which sibling wins a race is
+decided by event order, so pathwise IPA is valid only for statistics
+insensitive to the winner's identity — documented, not certified. The
+score estimator remains valid on racing records. The
+[racing and cancellation section](https://computingkitchen.com/Concourse.jl/dev/queues/richer_stations/#Racing-and-cancellation)
+covers the two cancellation policies and their exact trigger semantics.
+
 ## Documentation
 
 The [documentation](https://computingkitchen.com/Concourse.jl/dev/) has a

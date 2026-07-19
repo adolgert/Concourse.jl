@@ -436,6 +436,13 @@ the parent job disappears. `branches` names at least two destination
 stations. Forks take no time and hold no clock. A fork routes through its
 branches, so it cannot have a [`route!`](@ref). Pair it with a
 [`join!`](@ref) to synchronize the siblings again.
+
+A fork whose branches reach a canceling join (`cancel != :none`) is
+*tracked*: [`compile`](@ref) finds such forks by reachability, and at
+every split the full sibling roster is recorded so the join can later
+cancel each sibling wherever it sits. Checks C8 and C9 keep a tracked
+fork's branches unambiguous — one canceling join per fork, sibling
+traffic only on the branch stations.
 """
 function fork!(net::QueueNetwork, name::Symbol; branches)
     length(branches) >= 2 || throw(ArgumentError("a fork needs at least two branches"))
@@ -489,7 +496,10 @@ clock; stashed siblings still count as jobs in the system.
   (check C7).
 
 Cancellation is deterministic given the state — it consumes no draws, and
-the canceled work stays visible in the record.
+the canceled work stays visible in the record. [`compile`](@ref) keeps
+each race coherent: a fork's siblings may reach at most one canceling
+join (check C8), and the stations between a tracked fork and its
+canceling join receive sibling traffic only (check C9).
 """
 function join!(net::QueueNetwork, name::Symbol; parts::Int, need::Int=parts, cancel::Symbol=:none)
     parts >= 2 || throw(ArgumentError("a join needs at least two parts"))

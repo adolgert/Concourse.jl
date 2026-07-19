@@ -96,6 +96,156 @@ For comparison, a *single* M/M/1 at this load holds ``\rho/(1-\rho) = 1``
 job on average — synchronization pushes the two-branch system well above
 that, exactly as far as the formula says.
 
+## Racing and cancellation
+
+A join that waits for *all* siblings pays for the slowest one. The other
+classic use of a fork is the opposite bet: send the same request to ``n``
+replicas, keep the first answer, and throw the rest away. Two keywords of
+[`join!`](@ref) declare the race — `need`, how many siblings must arrive
+before the merge, and `cancel`, what happens to the others:
+
+```julia
+join!(net, :merge; parts = n, need = k, cancel = :on_completion)
+```
+
+The two cancellation policies differ in *where* the race is decided.
+
+- `cancel = :on_completion` decides it at the finish line. The moment the
+  `need`-th sibling of a group reaches the join, the group merges and
+  every other sibling is canceled wherever it sits — waiting in a buffer,
+  in service, or held blocked — freeing its server or waiting-room slot on
+  the spot, with the freed capacity refilled by the ordinary dispatch
+  cascade in the same instant.
+- `cancel = :on_start` decides it at the starting line. The moment the
+  `need`-th sibling of a group *enters service*, siblings still waiting in
+  buffers are canceled. A sibling already in service is never interrupted:
+  it runs to completion, and the join merges the first `need` finishers
+  and silently *absorbs* any later one, like a sink — the late finisher's
+  service stays visible in the record; only the join's output ignores it.
+
+The distinction has teeth even with memoryless service, where intuition
+says starting and finishing should not matter. Consider ``(n, 1)``: fork
+to ``n`` single-server replicas, `need = 1`. Under `:on_completion` all
+``n`` servers work on the head group until the first finishes — the
+service the group experiences is the *minimum* of ``n`` draws, and with
+exponential service the system is exactly M/M/1 at the pooled rate
+``n\mu``. Under `:on_start` the fork deposits all ``n`` siblings into
+their buffers before any dispatch happens, so the *first* service entry is
+already the `need`-th and cancels the rest while they wait: exactly one
+sibling per group ever serves, and the ``n`` replicas behave as one FCFS
+line with ``n`` servers — M/M/``n``, not a faster M/M/1. Simulation
+against both closed forms:
+
+```@example richer
+function race(n, cancel; service = Law(:Exponential, scale = inv(Param(:mu))))
+    net = QueueNetwork(param_names = (:lambda, :mu))
+    source!(net, :arrive; interarrival = Law(:Exponential, scale = inv(Param(:lambda))))
+    branches = [Symbol(:replica_, i) for i in 1:n]
+    fork!(net, :scatter; branches)
+    for b in branches
+        station!(net, b; service)
+        route!(net, b, Always(:first))
+    end
+    join!(net, :first; parts = n, need = 1, cancel)
+    sink!(net, :done)
+    route!(net, :arrive, Always(:scatter))
+    route!(net, :first, Always(:done))
+    compile(net)
+end
+
+θ = [1.0, 1.0]
+mc = race(3, :on_completion)
+ms = race(3, :on_start)
+Lc, sec = replicate(r -> time_average(groups_in_system, mc, r), mc, θ, 2000.0, 16)
+Ls, ses = replicate(r -> time_average(groups_in_system, ms, r), ms, θ, 2000.0, 16)
+
+# Exact answers by Little's law, L = λW.
+Wc = 1 / (3 * θ[2] - θ[1])                       # M/M/1 at rate 3μ
+a = θ[1] / θ[2]                                  # Erlang C for M/M/3
+tail = a^3 / (factorial(3) * (1 - a / 3))
+C = tail / (sum(a^k / factorial(k) for k in 0:2) + tail)
+Ws = 1 / θ[2] + C / (3 * θ[2] - θ[1])
+println("on_completion: ", round(Lc, digits = 3), " ± ", round(sec, digits = 3),
+        "   M/M/1 at 3μ: ", round(θ[1] * Wc, digits = 3))
+println("on_start:      ", round(Ls, digits = 3), " ± ", round(ses, digits = 3),
+        "   M/M/3:       ", round(θ[1] * Ws, digits = 3))
+```
+
+The `:on_completion` race is Joshi, Soljanin & Wornell's ``(n, 1)``
+fork-join with cancellation, and their Lemma 1 holds for *general*
+service: the system is M/G/1 with service ``X_{(1:n)}``, the minimum of
+``n`` draws, so the Pollaczek–Khinchine formula prices the whole race. A
+shifted-exponential law — a floor ``\Delta`` plus an exponential tail,
+the standard model of a replica with fixed overhead — makes the minimum
+``\Delta + \mathrm{Exp}(n\mu)``, and P–K needs only its two moments:
+
+```@example richer
+using Distributions: Exponential
+Δ, μs = 0.2, 2.0
+overhead_exp = Opaque((θ, mk, te) -> Δ + Exponential(1 / μs))
+mg = race(3, :on_completion; service = overhead_exp)
+
+λ = 1.5
+Lg, seg = replicate(r -> time_average(groups_in_system, mg, r), mg, [λ, 0.0], 2000.0, 16)
+
+EX  = Δ + 1 / (3μs)                              # E[X₍₁:₃₎]
+EX2 = Δ^2 + 2Δ / (3μs) + 2 / (3μs)^2             # E[X₍₁:₃₎²]
+W   = EX + λ * EX2 / (2 * (1 - λ * EX))          # Pollaczek–Khinchine
+println("measured groups in system: ", round(Lg, digits = 3), " ± ",
+        round(seg, digits = 3), "   P–K: ", round(λ * W, digits = 3))
+```
+
+The test suite runs this oracle for hyperexponential service too, and
+checks the price of redundancy from the record's service spans: every
+replica works on the head group for exactly ``X_{(1:n)}``, so the server
+time spent per merged job is ``E[C] = n\,E[X_{(1:n)}]``, canceled work
+included.
+
+A few semantics worth knowing before racing a larger network:
+
+- **Blocked siblings cancel cleanly.** A sibling canceled while held
+  blocked — finished at its station but waiting for room downstream —
+  frees both the server it was holding hostage and its slot in the blocked
+  queue, and the cascade admits the next job immediately. Cancellation
+  never wedges a blocking chain.
+- **Nested forks cancel recursively.** A canceled sibling that has itself
+  forked cancels its live descendants, all the way down. In the other
+  direction, a nested join's merged job inherits the group of its fork
+  parent, so inner races compose with outer ones.
+- **The record shows the canceled work.** Cancellation is deterministic
+  given the state: it consumes no draws and adds no event kind, so replay
+  reproduces every race from the same record ([I1 and I4](../manual/record_replay.md)).
+  A canceled service span is still visible — fold
+  [`fire_changes`](@ref) over the record and watch the clock's `st.te`
+  entry open and then vanish without a firing of its own; that fold is how
+  the ``E[C]`` test above counts abandoned work.
+
+Three compile-time checks keep a race coherent. A join with `need < parts`
+must declare a cancellation policy, or the leftover siblings would be
+stranded (check C7, caught at declaration):
+
+```@example richer
+try
+    join!(QueueNetwork(param_names = (:lambda,)), :first; parts = 3, need = 2)
+catch err
+    println(err.msg)
+end
+```
+
+[`compile`](@ref) then checks that a fork's siblings can reach at most
+*one* canceling join, so which join decides a group's race is unambiguous
+(check C8), and that every station strictly between a tracked fork and its
+canceling join receives sibling traffic only — no routes and no
+`renege_to` edges from outside — so a job found on a branch is always
+somebody's sibling (check C9).
+
+One estimator caveat, kept in the
+[estimator-validity table](../manual/state_dependent.md#Estimator-validity):
+which sibling wins a race is decided by event order, the canonical
+discontinuity that pathwise IPA cannot see. The score estimator remains
+valid on racing records; [Gradient estimation](../manual/gradients.md) has
+the details.
+
 ## Blocking
 
 Buffers are finite in real systems. When a station's waiting room is full,
