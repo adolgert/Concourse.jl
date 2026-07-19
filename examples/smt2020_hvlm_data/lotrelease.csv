@@ -1,0 +1,5 @@
+product,route,lot_type,priority,wafers_per_lot,release_interval_min
+Product_3,Route_Product_3,Regular_Lot_3,10,25,51.6900
+Product_4,Route_Product_4,Regular_Lot_4,10,25,51.6900
+Product_3,Route_Product_3,HotLot_3,20,25,2016.0000
+Product_4,Route_Product_4,HotLot_4,20,25,2016.0000
