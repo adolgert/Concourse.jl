@@ -9,10 +9,12 @@
 Abstract supertype of the expression algebra that law arguments are written
 in. A `ScalarExpr` is a value, not a closure, so the compile-time checker can
 see what an expression reads: parameters ([`reads_params`](@ref)), marks
-([`reads_marks`](@ref)), and time ([`reads_time`](@ref)).
+([`reads_marks`](@ref)), time ([`reads_time`](@ref)), and station
+occupancy ([`reads_state`](@ref)).
 
-The leaves are [`Param`](@ref), [`Mark`](@ref), [`Enab`](@ref), and
-[`Const`](@ref). Expressions combine with `+`, `-`, `*`, `/`, `inv`, `log`,
+The leaves are [`Param`](@ref), [`Mark`](@ref), [`Enab`](@ref),
+[`Const`](@ref), [`InService`](@ref), and [`InBuffer`](@ref). Expressions
+combine with `+`, `-`, `*`, `/`, `inv`, `log`,
 `exp`, `sqrt`, `min`, and `max`. A bare number in arithmetic with an
 expression is promoted to a `Const`.
 
@@ -77,6 +79,37 @@ expressions are promoted to `Const` automatically, so `Param(:mu) * 2` and
 """
 struct Const <: ScalarExpr
     value::Float64
+end
+
+"""
+    InService(station::Symbol)
+
+The number of jobs currently in service at the station named `station`, as
+a `Float64` count. Occupancy is live state, not a value frozen at enabling:
+only the *service law of a station* may read it ([`compile`](@ref) check
+C5), and whenever the count changes the law is re-evaluated mid-flight,
+with the job's accrued service effort carried over and `te` left at the
+original enabling — the same segment convention processor sharing uses.
+
+```julia
+# A server that speeds up with the crowd, saturating at three helpers.
+Law(:Exponential, scale = inv(Param(:mu) * min(InService(:cpu), Const(3.0))))
+```
+"""
+struct InService <: ScalarExpr
+    station::Symbol
+end
+
+"""
+    InBuffer(station::Symbol)
+
+The number of jobs waiting in the buffer at the station named `station`,
+as a `Float64` count. The rules of [`InService`](@ref) apply: only the
+service law of a station may read occupancy ([`compile`](@ref) check C5),
+and the law is re-evaluated whenever the watched count changes.
+"""
+struct InBuffer <: ScalarExpr
+    station::Symbol
 end
 
 struct Apply <: ScalarExpr
@@ -192,6 +225,8 @@ end
 evalexpr(e::Mark, params, θ, marks::NamedTuple, te, sv::AbstractStateView) = getfield(marks, e.name)
 evalexpr(::Enab, params, θ, marks, te, sv::AbstractStateView) = te
 evalexpr(e::Const, params, θ, marks, te, sv::AbstractStateView) = e.value
+evalexpr(e::InService, params, θ, marks, te, sv::AbstractStateView) = inservice_count(sv, e.station)
+evalexpr(e::InBuffer, params, θ, marks, te, sv::AbstractStateView) = inbuffer_count(sv, e.station)
 function evalexpr(e::Apply, params, θ, marks, te, sv::AbstractStateView)
     f = _OPS[e.op]
     if length(e.args) == 1
@@ -262,6 +297,40 @@ false
 reads_time(::Enab) = true
 reads_time(e::Apply) = any(reads_time(a) for a in e.args)
 reads_time(::ScalarExpr) = false
+
+"""
+    reads_state(x) -> Set{Symbol}
+
+The stations whose occupancy a [`ScalarExpr`](@ref) or a law reads through
+[`InService`](@ref) or [`InBuffer`](@ref). An [`Opaque`](@ref) law cannot
+read state — its callback never receives a state view — so it reads none.
+[`compile`](@ref) permits a nonempty set only in the service law of a
+station (check C5).
+
+# Example
+
+```jldoctest
+julia> reads_state(Param(:mu) * min(InService(:cpu), Const(3.0)))
+Set{Symbol} with 1 element:
+  :cpu
+```
+"""
+reads_state(e::InService) = Set{Symbol}([e.station])
+reads_state(e::InBuffer) = Set{Symbol}([e.station])
+reads_state(e::Apply) = union(Set{Symbol}(), (reads_state(a) for a in e.args)...)
+reads_state(::ScalarExpr) = Set{Symbol}()
+
+# The finer censuses behind the re-evaluation trigger: the stations watched
+# through InService specifically, and through InBuffer. reads_state is their
+# union; the compiled dependency map (srv_readers/buf_readers) keeps them
+# apart so a buffer-only change never re-evaluates a law that watches only
+# the service floor, and vice versa.
+_reads_srv(e::InService) = Set{Symbol}([e.station])
+_reads_srv(e::Apply) = union(Set{Symbol}(), (_reads_srv(a) for a in e.args)...)
+_reads_srv(::ScalarExpr) = Set{Symbol}()
+_reads_buf(e::InBuffer) = Set{Symbol}([e.station])
+_reads_buf(e::Apply) = union(Set{Symbol}(), (_reads_buf(a) for a in e.args)...)
+_reads_buf(::ScalarExpr) = Set{Symbol}()
 
 abstract type AbstractLaw end
 
@@ -345,9 +414,16 @@ end
 reads_params(l::Law) = union(Set{Symbol}(), (reads_params(a.second) for a in l.args)...)
 reads_marks(l::Law) = union(Set{Symbol}(), (reads_marks(a.second) for a in l.args)...)
 reads_time(l::Law) = any(reads_time(a.second) for a in l.args)
+reads_state(l::Law) = union(Set{Symbol}(), (reads_state(a.second) for a in l.args)...)
+_reads_srv(l::Law) = union(Set{Symbol}(), (_reads_srv(a.second) for a in l.args)...)
+_reads_buf(l::Law) = union(Set{Symbol}(), (_reads_buf(a.second) for a in l.args)...)
 reads_params(l::Opaque) = Set(l.params)
 reads_marks(l::Opaque) = Set(l.marks)
 reads_time(l::Opaque) = l.time
+# An Opaque callback never receives a state view, so it cannot read state.
+reads_state(::Opaque) = Set{Symbol}()
+_reads_srv(::Opaque) = Set{Symbol}()
+_reads_buf(::Opaque) = Set{Symbol}()
 isopaque(::Law) = false
 isopaque(::Opaque) = true
 

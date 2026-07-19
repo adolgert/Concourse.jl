@@ -484,11 +484,20 @@ plain data. Produced by [`compile`](@ref); consumed by the interpreter
 estimators. Station references are integer indices. `names` maps a station
 name to its index, and `params` maps a parameter name to its position in
 the parameter vector `θ`.
+
+`srv_readers` and `buf_readers` are the state-dependence map: `srv_readers[s]`
+lists the stations whose service law reads [`InService`](@ref) of station
+`s` (a [`ProcessorSharing`](@ref) station is an srv-reader of itself, since
+every resident's speed reads the resident count), and `buf_readers[s]`
+likewise for [`InBuffer`](@ref). [`fire_changes`](@ref) re-evaluates a
+reader's surviving service clocks whenever a watched count changes.
 """
 struct QueueGSMP
     stations::Vector{CompiledStation}
     names::Dict{Symbol,Int}
     params::Dict{Symbol,Int}
+    srv_readers::Vector{Vector{Int}}
+    buf_readers::Vector{Vector{Int}}
 end
 
 function _compilekernel(k::Always, names)
@@ -527,7 +536,10 @@ first violation:
 - deterministic kernels ([`ByMark`](@ref)) read marks only;
 - every law reads only declared parameters and marks some source produces;
 - no cycle of finite `:block` buffers exists, because a full cycle would
-  deadlock.
+  deadlock;
+- station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is read only by
+  the service law of a station, and every occupancy read names a declared
+  station (check C5).
 """
 function compile(net::QueueNetwork)
     names = Dict{Symbol,Int}(s.name => i for (i, s) in enumerate(net.stations))
@@ -557,7 +569,30 @@ function compile(net::QueueNetwork)
             ),
         )
     end
-    return QueueGSMP(stations, names, params)
+    # The state-dependence map: which stations' service laws watch each
+    # station's counts. Processor sharing is the built-in state-dependent
+    # law (speed min(1, servers/n) reads the own resident count), so a PS
+    # station registers as an srv-reader of itself and its re-evaluations
+    # ride the same general trigger as InService/InBuffer readers.
+    n = length(stations)
+    srv_readers = [Int[] for _ in 1:n]
+    buf_readers = [Int[] for _ in 1:n]
+    for (r, stn) in enumerate(stations)
+        stn.kind == :station || continue
+        svc = stn.service
+        if svc !== nothing
+            for w in _reads_srv(svc)
+                push!(srv_readers[names[w]], r)
+            end
+            for w in _reads_buf(svc)
+                push!(buf_readers[names[w]], r)
+            end
+        end
+        stn.discipline.name == :ps && push!(srv_readers[r], r)
+    end
+    foreach(v -> unique!(sort!(v)), srv_readers)
+    foreach(v -> unique!(sort!(v)), buf_readers)
+    return QueueGSMP(stations, names, params, srv_readers, buf_readers)
 end
 
 # Check C1 (structure) and the parts of C2 (mark dataflow) and the randomness
@@ -591,8 +626,15 @@ function check_network(net::QueueNetwork, names, params)
         k isa ByMark || continue
         isempty(reads_params(k.expr)) && !reads_time(k.expr) ||
             throw(ArgumentError("routing kernel at $origin may read only marks"))
+        isempty(reads_state(k.expr)) || throw(
+            ArgumentError(
+                "routing kernel at $origin reads station state; A4 reserves " *
+                "likelihood-bearing decisions for recorded draws (check C5)",
+            ),
+        )
     end
     check_blocking_acyclic(net)
+    check_state_reads(net, names)
     for s in net.stations
         s.renege_to === nothing ||
             haskey(names, s.renege_to) ||
@@ -610,6 +652,72 @@ function check_network(net::QueueNetwork, names, params)
             for mk in reads_marks(law)
                 mk in produced_marks ||
                     throw(ArgumentError("law at $(s.name) reads mark $mk no source produces"))
+            end
+        end
+    end
+    return nothing
+end
+
+# Check C5: only the service law of a station may read station occupancy
+# (InService/InBuffer). State in a mark law would enter the record's mark
+# draws; state in an arrival, patience, routing, or ordering expression
+# would either change the likelihood outside recorded draws (A4) or is a
+# feature of its own. Every occupancy read must name a declared station —
+# sources, sinks, forks, and joins hold no jobs to count.
+function check_state_reads(net::QueueNetwork, names)
+    kindof = Dict(s.name => s.kind for s in net.stations)
+    for s in net.stations
+        if s.mark !== nothing
+            for (mk, law) in s.mark.laws
+                isempty(reads_state(law)) || throw(
+                    ArgumentError(
+                        "mark law $mk at $(s.name) reads station state; state in a " *
+                        "mark law would put station state into the record's mark " *
+                        "draws, breaking replay — amendment A4 (check C5)",
+                    ),
+                )
+            end
+        end
+        if s.kind == :source && s.service !== nothing
+            isempty(reads_state(s.service)) || throw(
+                ArgumentError(
+                    "interarrival law at $(s.name) reads station state; " *
+                    "state-dependent arrivals/balking is a separate feature, " *
+                    "not supported (check C5)",
+                ),
+            )
+        end
+        if s.patience !== nothing
+            isempty(reads_state(s.patience)) || throw(
+                ArgumentError(
+                    "patience law at $(s.name) reads station state; only the " *
+                    "service law of a station may read occupancy (check C5)",
+                ),
+            )
+        end
+        if s.discipline.by !== nothing
+            isempty(reads_state(s.discipline.by)) || throw(
+                ArgumentError(
+                    "discipline ordering key at $(s.name) reads station state; only " *
+                    "the service law of a station may read occupancy (check C5)",
+                ),
+            )
+        end
+        if s.kind == :station && s.service !== nothing
+            for w in reads_state(s.service)
+                haskey(names, w) || throw(
+                    ArgumentError(
+                        "service law at $(s.name) reads occupancy of unknown " *
+                        "station $w (check C5)",
+                    ),
+                )
+                kindof[w] == :station || throw(
+                    ArgumentError(
+                        "service law at $(s.name) reads occupancy of $w, which is " *
+                        "a $(kindof[w]), not a station — only stations have " *
+                        "in-service and buffer counts (check C5)",
+                    ),
+                )
             end
         end
     end
@@ -661,8 +769,9 @@ end
 
 Check C4, advisory: solve the traffic equations for the statically-known
 kernels and report per-station utilization ρ = λ E[S] / servers at `θ`,
-warning at ρ ≥ 1. Mark-dependent routing and mark-reading service laws have
-no static visit ratios or means, so those stations are skipped — the census
+warning at ρ ≥ 1. Mark-dependent routing, mark-reading service laws, and
+state-reading service laws ([`InService`](@ref)/[`InBuffer`](@ref)) have no
+static visit ratios or means, so those stations are skipped — the census
 principle: report what the combinator values expose, silently invent nothing.
 """
 function stability(m::QueueGSMP, θ::AbstractVector)
@@ -709,6 +818,9 @@ function stability(m::QueueGSMP, θ::AbstractVector)
         svc = stn.service
         svc === nothing && continue
         reads_marks(svc) == Set{Symbol}() || continue
+        # A state-reading law has no occupancy to read here; skip, do not
+        # invent one (its NOSTATE evaluation would throw).
+        isempty(reads_state(svc)) || continue
         ρ = λ[s] * mean(builddist(svc, m.params, θ, NamedTuple(), 0.0, NOSTATE)) / stn.servers
         push!(out, (stn.name, ρ))
         ρ >= 1 && @warn "station $(stn.name) is unstable at this θ" ρ

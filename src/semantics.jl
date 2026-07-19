@@ -126,13 +126,19 @@ Distributions.partype(d::SharedRemaining) = Distributions.partype(d.base)
 
 function family_law(::Val{:service}, m, θ, key, st)
     stn = m.stations[key[2]]
-    # A :service clock exists only where compile stored a service law.
-    F = builddist(stn.service::AbstractLaw, m.params, θ, st.jobs[key[3]], st.te[key], NOSTATE)
-    stn.discipline.name == :ps || return F
-    # Speed changes compile to mid-flight re-evaluations of this value with
-    # te fixed — the contract's segment convention, not a te rewrite.
+    # Service laws alone may read occupancy (check C5), so this is the one
+    # call site that passes a real view; the base law F may change between
+    # segments when a watched count changes.
+    sv = StateView(st.srv, st.buf, m.names)
+    F = builddist(stn.service::AbstractLaw, m.params, θ, st.jobs[key[3]], st.te[key], sv)
+    # Law changes compile to mid-flight re-evaluations of this value with
+    # te fixed — the contract's segment convention, not a te rewrite. The
+    # surviving clock carries its accrued effort `a` in bank/anchor; the new
+    # law is the base conditioned on X > a. Under processor sharing the
+    # effort also accrues at speed min(1, servers/n); every other station
+    # serves at speed 1.
     n = length(st.srv[key[2]])
-    r = min(1.0, stn.servers / n)
+    r = stn.discipline.name == :ps ? min(1.0, stn.servers / n) : 1.0
     a = get(st.bank, key, 0.0)
     shift = get(st.anchor, key, st.te[key]) - st.te[key]
     (a == 0.0 && r == 1.0 && shift == 0.0) && return F
@@ -200,6 +206,19 @@ function derive_deltas!(
     m::QueueGSMP, old::QueueState, new::QueueState, fired::ClockKey, t::Float64, touched::Set{Int}
 )
     deltas = ClockDelta[]
+    # State-dependent re-evaluation, first pass: every station whose service
+    # law watches an occupancy that changed (the compiled srv_readers /
+    # buf_readers map, which includes each PS station watching itself) is a
+    # reader this firing. Readers join `touched` before the membership loop
+    # so their own derived deltas stay consistent; an untouched reader's
+    # state is unchanged, so joining adds no spurious diffs and no further
+    # readers.
+    readers = Set{Int}()
+    for s in touched
+        length(old.srv[s]) == length(new.srv[s]) || union!(readers, m.srv_readers[s])
+        length(old.buf[s]) == length(new.buf[s]) || union!(readers, m.buf_readers[s])
+    end
+    union!(touched, readers)
     for s in sort!(collect(touched))
         for fam in CLOCK_FAMILIES
             a = ClockKey[]
@@ -211,8 +230,12 @@ function derive_deltas!(
             for k in a
                 (k in bset || k == fired) && continue
                 if family_memory(Val(fam), m, k) == :resume
-                    new.bank[k] = get(new.bank, k, 0.0) + (t - new.te[k])
+                    # Bank from the last anchor, not from te: a clock the
+                    # re-evaluation pass has touched already banked its
+                    # earlier segments.
+                    new.bank[k] = get(new.bank, k, 0.0) + (t - get(new.anchor, k, new.te[k]))
                 end
+                delete!(new.anchor, k)
                 delete!(new.te, k)
                 push!(deltas, (:disable, k))
             end
@@ -224,40 +247,36 @@ function derive_deltas!(
                 else
                     new.te[k] = t
                     delete!(new.bank, k)
-                    delete!(new.anchor, k)
                 end
+                delete!(new.anchor, k)
                 push!(deltas, (:enable, k))
             end
-            family_reenables!(deltas, Val(fam), m, old, new, s, t)
+        end
+    end
+    # Second pass, the one delta kind membership cannot see (event_loop.tex
+    # §2.4): a clock whose law changed while it stayed enabled. For each
+    # reader, every surviving in-service clock banks the effort accrued at
+    # the old speed (min(1, servers/n_old) under PS, 1 elsewhere), moves its
+    # anchor to now, keeps te at the original enabling — the segment
+    # convention — and tells the sampler to re-evaluate. Newly admitted
+    # clocks are owned by the enable pass above; the fired clock is gone.
+    # `readers` is a set and each survivor appears once, so a clock is
+    # re-enabled at most once per firing however many watched counts changed.
+    for r in sort!(collect(readers))
+        stn = m.stations[r]
+        n_old = length(old.srv[r])
+        n_old == 0 && continue           # no survivors to re-evaluate
+        speed_old = stn.discipline.name == :ps ? min(1.0, stn.servers / n_old) : 1.0
+        for j in new.srv[r]
+            j in old.srv[r] || continue
+            k = (:service, Int32(r), j)
+            k == fired && continue
+            new.bank[k] = get(new.bank, k, 0.0) + speed_old * (t - get(new.anchor, k, new.te[k]))
+            new.anchor[k] = t
+            push!(deltas, (:reenable, k))
         end
     end
     return deltas
-end
-
-# The one delta kind membership cannot see (event_loop.tex §2.4): a clock
-# whose law changed while it stayed enabled. Default: no family re-evaluates.
-family_reenables!(deltas, ::Val, m, old, new, s, t) = nothing
-
-# Processor sharing: a change in the resident count changes every survivor's
-# speed. Bank the internal age accrued at the old speed, move the anchor to
-# now, leave te alone, and tell the sampler to re-evaluate.
-function family_reenables!(
-    deltas, ::Val{:service}, m::QueueGSMP, old::QueueState, new::QueueState, s::Int, t::Float64
-)
-    stn = m.stations[s]
-    (stn.kind == :station && stn.discipline.name == :ps) || return nothing
-    n_old = length(old.srv[s])
-    n_new = length(new.srv[s])
-    (n_old == 0 || n_old == n_new) && return nothing
-    r_old = min(1.0, stn.servers / n_old)
-    for j in new.srv[s]
-        k = (:service, Int32(s), j)
-        j in old.srv[s] || continue      # newly admitted: the enable pass owns it
-        new.bank[k] = get(new.bank, k, 0.0) + r_old * (t - get(new.anchor, k, new.te[k]))
-        new.anchor[k] = t
-        push!(deltas, (:reenable, k))
-    end
-    return nothing
 end
 
 function family_fire!(::Val{:arrival}, m, st, key, t, draws, wl, touched)
@@ -426,13 +445,12 @@ end
 
 # Under processor sharing every job is in service; `servers` is the shared
 # capacity in the speed min(1, servers/n), not a slot count.
-function _freeslots(m, st, q)
-    return if m.stations[q].discipline.name == :ps
+_freeslots(m, st, q) =
+    if m.stations[q].discipline.name == :ps
         typemax(Int)
     else
         m.stations[q].servers - length(st.srv[q]) - length(st.hold[q])
     end
-end
 
 function selectjob!(m::QueueGSMP, st::QueueState, q::Int, draws::DrawSource)
     disc = m.stations[q].discipline

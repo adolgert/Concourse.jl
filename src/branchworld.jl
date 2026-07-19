@@ -50,12 +50,38 @@ function _assert_thetafree_marks(m::QueueGSMP)
         stn.mark === nothing && continue
         for (name, law) in stn.mark.laws
             ps = reads_params(law)
-            isempty(ps) || throw(ArgumentError(
-                "branchable worlds support θ-free marks only for now; mark " *
-                "$name of $(stn.name) reads parameters $(sort!(collect(ps)))"))
+            isempty(ps) || throw(
+                ArgumentError(
+                    "branchable worlds support θ-free marks only for now; mark " *
+                    "$name of $(stn.name) reads parameters $(sort!(collect(ps)))",
+                ),
+            )
         end
     end
-    nothing
+    return nothing
+end
+
+# State-dependent service laws stay refused: pathwise branching replays one
+# event order against another, and when reordering changes an occupancy, an
+# occupancy-dependent law changes with it — the clone-based estimators'
+# unbiasedness argument does not cover that coupling. The score estimator
+# (score_gradient over replay_model) handles these models.
+function _assert_stateless_service(m::QueueGSMP)
+    for stn in m.stations
+        stn.kind == :station || continue
+        stn.service === nothing && continue
+        ss = reads_state(stn.service)
+        isempty(ss) || throw(
+            ArgumentError(
+                "branchable worlds support state-blind service laws only for now; " *
+                "the service law of $(stn.name) reads occupancy of " *
+                "$(sort!(collect(ss))), and pathwise branching is not guaranteed " *
+                "unbiased when event reordering changes an occupancy-dependent " *
+                "law — use the score estimator instead",
+            ),
+        )
+    end
+    return nothing
 end
 
 """
@@ -71,7 +97,10 @@ honestly.
 Marks, [`Probabilistic`](@ref) routing, and [`SIRO`](@ref) are admitted
 because their draws are θ-free. A mark law that reads a parameter is
 refused with an `ArgumentError`: its own derivative would add a term to
-every estimator, and that term is not implemented.
+every estimator, and that term is not implemented. A service law that reads
+station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is refused too:
+pathwise branching is not guaranteed unbiased when event reordering changes
+an occupancy-dependent law — use the score estimator for those models.
 
 # Example
 
@@ -82,9 +111,9 @@ res = ClockGradients.branching_gradient(
     nreps = 1200, horizon = 5.0, seed = 17, branch_rng_seed = 18)
 ```
 """
-function branch_world(m::QueueGSMP, θ::AbstractVector; seed::Integer,
-                      method=NextReactionMethod())
+function branch_world(m::QueueGSMP, θ::AbstractVector; seed::Integer, method=NextReactionMethod())
     _assert_thetafree_marks(m)
+    _assert_stateless_service(m)
     rng = Xoshiro(seed)
     ctx = SamplingContext(SamplerBuilder(ClockKey, Float64; method), rng)
     # The interpreter's own seeding order: the auxiliary family's seed is the
@@ -94,13 +123,13 @@ function branch_world(m::QueueGSMP, θ::AbstractVector; seed::Integer,
     for k in enabled(m, st)
         enable!(ctx, k, clock_distribution(m, θ, k, st), st.te[k])
     end
-    ConcourseWorld(m, collect(Float64, θ), st, ctx, streams, 0.0)
+    return ConcourseWorld(m, collect(Float64, θ), st, ctx, streams, 0.0)
 end
 
 function ClockGradients.branch_peek(w::ConcourseWorld)
     (t, k) = next(w.ctx)
     (k === nothing || !isfinite(t)) && return nothing
-    (t, k)
+    return (t, k)
 end
 
 # Commit and force share one update path — the resulting world depends on
@@ -111,17 +140,17 @@ function _world_apply!(w::ConcourseWorld, key::ClockKey, t::Float64)
     apply_deltas!(w.ctx, w.m, w.θ, st, deltas, t)
     w.state = st
     w.time = t
-    w
+    return w
 end
 
 function ClockGradients.branch_commit!(w::ConcourseWorld, key, tstar)
     fire!(w.ctx, key, Float64(tstar))
-    _world_apply!(w, key, Float64(tstar))
+    return _world_apply!(w, key, Float64(tstar))
 end
 
 function ClockGradients.branch_force!(w::ConcourseWorld, key, tstar)
     CompetingClocks.force_fire!(w.ctx, key, Float64(tstar))
-    _world_apply!(w, key, Float64(tstar))
+    return _world_apply!(w, key, Float64(tstar))
 end
 
 # clone(ctx, rng) is deliberately fresh-and-empty; the COUPLED copy is
@@ -134,7 +163,7 @@ function ClockGradients.branch_clone(w::ConcourseWorld)
     ctx2.time = w.ctx.time
     # copy carries the auxiliary generators' STATES, so the clone's next mark
     # or routing draw equals the original's (the Q1 copying obligation).
-    ConcourseWorld(w.m, w.θ, copystate(w.state), ctx2, copy(w.streams), w.time)
+    return ConcourseWorld(w.m, w.θ, copystate(w.state), ctx2, copy(w.streams), w.time)
 end
 
 # Rekey-then-jitter, the same pairing the ChronoSim adapter uses: reseeding
@@ -149,7 +178,7 @@ function ClockGradients.branch_rekey!(w::ConcourseWorld, seed)
     # sizes and coin flips. Same-seed clones share both families, which is
     # what keeps corresponding jobs' draws matched across them.
     CompetingClocks.rekey_streams!(w.streams, UInt64(seed))
-    w
+    return w
 end
 
 ClockGradients.branch_time(w::ConcourseWorld) = w.time
@@ -158,11 +187,12 @@ ClockGradients.branch_time(w::ConcourseWorld) = w.time
 # sampler agrees), sorted by key as the protocol's coupling contract demands.
 function ClockGradients.branch_enabled_ages(w::ConcourseWorld)
     ks = sort!(enabled(w.m, w.state))
-    [(k, w.time - w.state.te[k]) for k in ks]
+    return [(k, w.time - w.state.te[k]) for k in ks]
 end
 
-ClockGradients.branch_clock_distribution(w::ConcourseWorld, θ::AbstractVector, key) =
-    clock_distribution(w.m, θ, key, w.state)
+function ClockGradients.branch_clock_distribution(w::ConcourseWorld, θ::AbstractVector, key)
+    return clock_distribution(w.m, θ, key, w.state)
+end
 
 ClockGradients.branch_state(w::ConcourseWorld) = w.state
 
@@ -170,6 +200,6 @@ ClockGradients.branch_state(w::ConcourseWorld) = w.state
 # putative times read from the sampler's public per-clock indexer.
 function ClockGradients.branch_schedule(w::ConcourseWorld)
     sched = [(k, w.ctx.sampler[k]) for (k, _) in ClockGradients.branch_enabled_ages(w)]
-    sort!(sched; by = p -> p[2])
-    sched
+    sort!(sched; by=p -> p[2])
+    return sched
 end
