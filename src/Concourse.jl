@@ -44,6 +44,7 @@ export ScalarExpr, Param, Mark, Enab, Const, InService, InBuffer, Law, Opaque, M
 export reads_params, reads_marks, reads_time, reads_state
 # The surface language
 export QueueNetwork, source!, station!, sink!, fork!, join!, route!, compile
+export Batching
 export FCFS, LCFS, SIRO, Priority, ProcessorSharing, SRPT
 export Always, ByMark, Probabilistic, RoundRobin, FCFSUnblock
 # The IR and its contract functions

@@ -23,8 +23,9 @@ wall-clock `time`, the count `nfired` of firings so far, the next job id,
 and per-station vectors of job ids: `buf` (waiting, in discipline order),
 `srv` (in service), and `hold` (finished but blocked from transferring).
 `jobs` maps each live job id to its marks. `pending` and `group` track
-fork–join siblings, and `cursor` holds each [`RoundRobin`](@ref) kernel's
-position.
+fork–join siblings, `batchmembers` maps a synthetic batch job to the member
+jobs it gathered (members stay in `jobs` but appear in no station vector),
+and `cursor` holds each [`RoundRobin`](@ref) kernel's position.
 
 The state also carries the clock bookkeeping that determines future
 behavior, so the sampler can be a pure consumer of it: `te` holds each
@@ -45,6 +46,7 @@ mutable struct QueueState
     jobs::Dict{JobId,NamedTuple}
     pending::Vector{Dict{JobId,Vector{JobId}}}  # per JOIN, group => siblings stashed so far
     group::Dict{JobId,JobId}        # sibling => its fork group (the parent's id)
+    batchmembers::Dict{JobId,Vector{JobId}}     # batch job => members, in gather order
     cursor::Vector{Int}             # RoundRobin state, in the IR so replay reproduces it
     te::Dict{ClockKey,Float64}
     bank::Dict{ClockKey,Float64}
@@ -71,7 +73,7 @@ function initial_state(m::QueueGSMP)
                     [JobId[] for _ in 1:n], [Tuple{Int32,JobId}[] for _ in 1:n],
                     Dict{JobId,NamedTuple}(),
                     [Dict{JobId,Vector{JobId}}() for _ in 1:n],
-                    Dict{JobId,JobId}(), ones(Int, n),
+                    Dict{JobId,JobId}(), Dict{JobId,Vector{JobId}}(), ones(Int, n),
                     Dict{ClockKey,Float64}(), Dict{ClockKey,Float64}(),
                     Dict{ClockKey,Float64}())
     for (s, stn) in enumerate(m.stations)
@@ -86,7 +88,9 @@ function copystate(st::QueueState)
                [copy(v) for v in st.hold], [copy(v) for v in st.blocked],
                copy(st.jobs),
                [Dict(g => copy(v) for (g, v) in d) for d in st.pending],
-               copy(st.group), copy(st.cursor), copy(st.te), copy(st.bank),
+               copy(st.group),
+               Dict(b => copy(v) for (b, v) in st.batchmembers),
+               copy(st.cursor), copy(st.te), copy(st.bank),
                copy(st.anchor))
 end
 
@@ -102,6 +106,7 @@ function states_equal(a::QueueState, b::QueueState)
     a.time == b.time && a.nfired == b.nfired && a.next_id == b.next_id &&
         a.buf == b.buf && a.srv == b.srv && a.hold == b.hold &&
         a.blocked == b.blocked && a.jobs == b.jobs && a.pending == b.pending &&
-        a.group == b.group && a.cursor == b.cursor &&
+        a.group == b.group && a.batchmembers == b.batchmembers &&
+        a.cursor == b.cursor &&
         a.te == b.te && a.bank == b.bank && a.anchor == b.anchor
 end
