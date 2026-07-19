@@ -75,8 +75,10 @@ function preemptive_priority()
 end
 
 # A tandem line with a finite :block buffer in the middle: the cascade and
-# unblock machinery under test. Acyclic, so C3 holds by construction.
-function blocking_tandem(; cap=2)
+# unblock machinery under test. Acyclic, so C3 holds by construction;
+# allow_blocking_cycles is inert here and passed through only so tests can
+# assert that inertness.
+function blocking_tandem(; cap=2, allow_blocking_cycles=false)
     net = QueueNetwork(; param_names=(:lambda, :mu1, :mu2))
     source!(net, :arrive; interarrival=Law(:Exponential; scale=inv(Param(:lambda))))
     station!(net, :first; service=Law(:Exponential; scale=inv(Param(:mu1))))
@@ -91,7 +93,30 @@ function blocking_tandem(; cap=2)
     route!(net, :arrive, Always(:first))
     route!(net, :first, Always(:second))
     route!(net, :second, Always(:done))
-    return compile(net)
+    return compile(net; allow_blocking_cycles)
+end
+
+# A two-station :block loop (capability 5): source → :a → :b, and :b feeds
+# back to :a with probability q or escapes to the sink. Both buffers are
+# finite with overflow = :block, so the topology has a blocking cycle and
+# needs compile's allow_blocking_cycles; pass false to exercise the C3
+# default. The cycle's effective load is λ / ((1 - q) μ) — a feedback loop
+# with escape probability 1 - q has visit ratio 1 / (1 - q) — so
+# non-deadlocking tests must keep that clearly below 1.
+function blocking_loop(; cap_a=1, cap_b=1, q=0.5, allow_blocking_cycles=true)
+    net = QueueNetwork(; param_names=(:lambda, :mu_a, :mu_b))
+    source!(net, :arrive; interarrival=Law(:Exponential; scale=inv(Param(:lambda))))
+    station!(
+        net, :a; service=Law(:Exponential; scale=inv(Param(:mu_a))), capacity=cap_a, overflow=:block
+    )
+    station!(
+        net, :b; service=Law(:Exponential; scale=inv(Param(:mu_b))), capacity=cap_b, overflow=:block
+    )
+    sink!(net, :done)
+    route!(net, :arrive, Always(:a))
+    route!(net, :a, Always(:b))
+    route!(net, :b, Probabilistic(:a => q, :done => 1 - q))
+    return compile(net; allow_blocking_cycles)
 end
 
 # A birth-death chain as a queueing model: Poisson arrivals at rate λ feed a

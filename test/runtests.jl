@@ -17,6 +17,7 @@ for file in [
     "test_replay.jl",
     "test_splits.jl",
     "test_blocking.jl",
+    "test_blocking_cycles.jl",
     "test_checks.jl",
     "test_samplers.jl",
     "test_reneging.jl",
