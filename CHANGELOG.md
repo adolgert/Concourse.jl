@@ -10,6 +10,20 @@ and this project adheres to
 
 ### Added
 
+- Documentation wrap-up for the round-service capabilities: a
+  "Round-based token service" manual page (`docs/src/manual/rounds.md` —
+  the round lifecycle, the C12 station shape, the policy purity
+  contract, the seven shipped policies with their paper citations,
+  eviction/cancellation/blocking semantics, the M/D/1 degenerate
+  example, and the behavioral notes from the paper reproductions);
+  round-service and draw-source sections on the reference pages;
+  estimator-validity rows for round service (the θ-placement cases,
+  including the no-score-channel `Dirac`-duration gap) and
+  `ShortestQueue`; amendment A6 (round-plan state, one clock per round,
+  policy purity) and the C11–C13 compile-check registry in
+  `notes/model_definition.tex`; README caveat paragraphs for round
+  service and shortest-queue routing.
+
 - Deterministic state-reading routing: `route!(net, from,
   ShortestQueue(dests...; by = :requests))` sends each departing job to
   the destination with the smallest occupancy, deterministically — ties

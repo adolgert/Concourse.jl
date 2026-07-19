@@ -185,6 +185,8 @@ model features; later capabilities will extend it.
 | State-dependent service laws | not guaranteed | **valid** | valid |
 | [Batch service](batching.md) (`Batching`) | not guaranteed | **valid** | valid |
 | [Sibling cancellation](../queues/richer_stations.md#Racing-and-cancellation) (`join!` with `cancel`) | not guaranteed | **valid** | valid |
+| [Round service](rounds.md) (`Rounds`) | not guaranteed | **valid**, except θ in a `Dirac` duration | valid |
+| [`ShortestQueue`](../queues/networks.md#Joining-the-shortest-queue) routing | not guaranteed | **valid** | valid |
 
 - **``\theta``-dependent mark laws** (the existing
   [branching](branching.md) restriction): a mark law that reads a
@@ -239,6 +241,42 @@ model features; later capabilities will extend it.
   inside the conditioning; SPA is the road to latency derivatives for
   racing models. Canceled clocks are removed, never re-declared, so these
   records do not trip `spa_gradient`'s multi-segment refusal.
+- **[Round service](rounds.md), score**: valid for θ in the *arrival,
+  mark, or remark laws feeding* a round station — round dynamics are a
+  deterministic map of the recorded draws (the policy contract forbids θ),
+  so the likelihood lives entirely in the laws that produced them — and
+  valid as usual for θ in a *density-bearing* duration law, whose
+  aggregates are frozen pseudo-marks. But θ inside a **`Dirac` duration**
+  (Dai's staircase constants are the common case) has **no score channel
+  at all**: a point mass bears no density, so the score estimator cannot
+  see those parameters — a documented gap, not a silently wrong number.
+- **Round service, pathwise IPA**: not guaranteed unbiased — the batching
+  discontinuity in its sharpest form. Allocations are integer tokens: a
+  perturbation that reorders a deposit against a round boundary changes
+  the plan by whole tokens and whole jobs. This is why `branch_world`
+  refuses models containing round stations in v1; score gradients over
+  their records remain available for θ in the feeding laws.
+- **Round service, SPA**: valid in the same sense as batching — a swap's
+  correction conditions on the realized order, so the replanning a swap
+  causes sits inside the conditioning, and SPA is where a derivative in a
+  `Dirac` duration's constants would live (between reorderings the
+  staircase moves event times smoothly). No analysis or code path exists
+  for round records yet; the claim is the direction of travel, not a
+  shipped estimator.
+- **[`ShortestQueue`](../queues/networks.md#Joining-the-shortest-queue),
+  score**: valid. The routing decision is a deterministic function of
+  state — it draws nothing, records nothing, and bears no likelihood, so
+  the record's likelihood is exactly the product of the terms the laws
+  contribute, unchanged by the kernel.
+- **`ShortestQueue`, pathwise IPA**: not certified — a perturbation that
+  reorders two events can flip a routing decision discontinuously, and a
+  flipped destination is a different path by a whole job. `branch_world`
+  refuses models containing `ShortestQueue` in v1, the state-reading
+  refusal precedent.
+- **`ShortestQueue`, SPA**: valid — the flip a swap causes is a
+  deterministic consequence of the realized order, so it sits inside the
+  swap's conditioning like a cancellation's identity switch. As with the
+  other SPA rows, `spa_gradient` has no code path for these records yet.
 
 [Closed networks](closed_networks.md) (`populate!`) earn no row: initial
 marks are ordinary recorded draws, consumed once at ``t = 0`` and replayed
