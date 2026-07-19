@@ -90,6 +90,11 @@ The amendments, agreed in design discussion on July 17, 2026:
   probabilistic routing, SIRO's pick --- consumes an explicit, keyed,
   recorded draw source that appears in the function's signature.
   (Section~\ref{sec:a4}.)
+\item[A5.] \emph{State-dependent service laws carry age across segments.}
+  A station's service law may read live occupancy; when a watched count
+  changes, each surviving clock is re-declared with the fresh law
+  conditioned on its accrued service effort, \code{te} fixed. (Added
+  July 18, 2026; Section~\ref{sec:a5}.)
 \end{description}
 
 One contract delta against ClockGradients.jl falls out of A1 and is proposed
@@ -376,6 +381,64 @@ The marked record is therefore
 ``all auxiliary draws.'' The checker's census (C6) enumerates the possible
 draws per family from the combinator values (A3), so
 record-schema-vs-model agreement is itself checkable.
+
+%==============================================================================
+\section{A5: state-dependent service laws carry age across segments}
+\label{sec:a5}
+
+Added July 18, 2026, with the state-dependent-service capability; the
+phase-1 amendments above are unchanged by it.
+
+A station's service law may read live occupancy through two new atoms of
+the A3 algebra, \code{InService(station)} and \code{InBuffer(station)},
+with \code{reads\_state} joining the derived censuses. Occupancy is live
+state, not a value frozen at enabling, so the read is scoped: only the
+service law of a \emph{station} may read occupancy. State in a mark law
+would push station state into the record's mark draws, violating A4's
+conditioning; a state-reading interarrival law is balking, a feature of
+its own; patience laws, routing kernels, and discipline ordering keys are
+refused likewise. This is the compile check the code registry numbers C5
+(see the registry remark below).
+
+The semantics is the \emph{age-carryover segment convention}. Compile
+builds a dependency map (\code{srv\_readers}/\code{buf\_readers}) from the
+census. When a firing changes a watched in-service or buffer count at
+time $t$, every surviving in-service clock of a reader station closes a
+segment: it banks the effort accrued since its last anchor at the old
+speed ($\min(1, \code{servers}/n)$ under PS, $1$ elsewhere), moves its
+anchor to $t$, keeps \code{te} at the original enabling --- \code{te} is
+never rewritten --- and is re-declared to the sampler as
+\code{(:reenable, k)}. The re-declared law is the \emph{fresh base}
+$F_{\mathrm{new}}$, rebuilt from the occupancy at $t$, conditioned on the
+total draw exceeding the accrued effort $a$: $X \sim F_{\mathrm{new}}
+\mid X > a$, delivered as a wall-time distribution anchored at $t$ (the
+existing \code{SharedRemaining} wrapper). Processor sharing becomes a
+special case of this general path: a PS station is an srv-reader of
+itself, with base unchanged and speed $\min(1, \code{servers}/n)$.
+
+The rejected alternative was the quantile-equivalent (hazard-matching)
+mapping, which carries the old law's survival quantile into the new law
+so that survival probability is continuous across the change. Age
+carryover won on two grounds: it is what processor sharing already
+implements, and it is what the ClockGradients fixed-anchor contract
+expects --- \code{te} anchors every likelihood segment, and the score
+replay rebuilds the current segment's law at every state it visits.
+Pathwise branching is \emph{not} admitted for these models
+(\code{branch\_world} refuses): reordering events changes an occupancy,
+hence the law, discontinuously, and the clone estimators' unbiasedness
+argument does not cover that coupling. The score estimator remains valid;
+the stability check (C4) skips state-reading stations rather than invent
+a static mean.
+
+\paragraph{Registry remark.} \code{queue\_layers.tex}~\S3.7 numbers its
+checks C1--C6 with C5 = oracle detection and C6 = randomness census, and
+this note cites those meanings above (Sections~\ref{sec:a3},
+\ref{sec:a4}, \ref{sec:charter}). Concourse's \emph{compile-time} registry
+diverged: its C5 is the state-reading scope check of this amendment (the
+oracle detector is not a compile check in Concourse). In this note,
+``compile check C5 (state-reading scope)'' refers to the code's registry;
+an unqualified C5 elsewhere in this document keeps the
+\code{queue\_layers.tex} meaning.
 
 %==============================================================================
 \section{The amended contract surface}

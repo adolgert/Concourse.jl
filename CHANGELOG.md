@@ -10,6 +10,23 @@ and this project adheres to
 
 ### Added
 
+- State-dependent service laws: the expression atoms `InService(station)`
+  and `InBuffer(station)` let a station's service law read live occupancy
+  as `Float64` counts.
+- `reads_state`, the census of which stations' occupancy an expression or
+  law watches; `compile` builds its re-evaluation dependency map from it.
+- Compile check C5, confining occupancy reads to the service laws of
+  stations (mark, interarrival, and patience laws, routing kernels, and
+  discipline ordering keys are refused).
+- General mid-flight re-evaluation with age carryover: when a watched
+  count changes, surviving service clocks bank their accrued effort,
+  re-anchor at the change, keep `te`, and redraw from the fresh law
+  conditioned on the banked effort. Processor sharing now rides this
+  general path as a special case.
+- `CONCOURSE_TEST_QUICK=1` environment variable, shrinking test
+  replication counts for fast local iteration.
+- Manual page on state-dependent service laws with the estimator-validity
+  table, and amendment A5 in `notes/model_definition.tex`.
 - MIT license, test CI, Aqua/JET quality tests, CompatHelper/TagBot
   workflows, JuliaFormatter config, and a local benchmark suite.
 

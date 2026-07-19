@@ -33,6 +33,7 @@ makedocs(
             "manual/statistics.md",
             "manual/samplers.md",
             "manual/checking.md",
+            "manual/state_dependent.md",
             "manual/bcmp_hpc.md",
         ],
         "Reference" => [

@@ -281,7 +281,12 @@ end
 Add a service station called `name` to the network.
 
 - `service`: the service-time law, required. It may read parameters, the
-  job's marks, and the enabling time.
+  job's marks, and the enabling time. Alone among laws it may also read
+  live station occupancy through [`InService`](@ref)/[`InBuffer`](@ref)
+  (check C5); such a law is re-evaluated whenever a watched count changes,
+  with the job's accrued service effort carried over and `te` kept at the
+  original enabling — the same segment convention
+  [`ProcessorSharing`](@ref) uses.
 - `discipline`: how the waiting line is kept and served — [`FCFS`](@ref)
   (the default), [`LCFS`](@ref), [`SIRO`](@ref), [`Priority`](@ref),
   [`ProcessorSharing`](@ref), or [`SRPT`](@ref).
