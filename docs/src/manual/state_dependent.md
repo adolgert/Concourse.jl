@@ -183,6 +183,7 @@ model features; later capabilities will extend it.
 |---|---|---|---|
 | ``\theta``-dependent mark laws | not guaranteed | not guaranteed | not guaranteed |
 | State-dependent service laws | not guaranteed | **valid** | valid |
+| [Batch service](batching.md) (`Batching`) | not guaranteed | **valid** | valid |
 
 - **``\theta``-dependent mark laws** (the existing
   [branching](branching.md) restriction): a mark law that reads a
@@ -205,6 +206,21 @@ model features; later capabilities will extend it.
   `spa_gradient`, however, refuses any record containing re-declared
   clocks rather than handle multi-segment histories, so this validity has
   no code path yet; use the score estimator today.
+- **[Batch service](batching.md), score**: valid. The batch clock's law
+  reads only the `batchsize` mark, frozen at enabling like every mark, so
+  each interval's likelihood is exactly what the record pins down —
+  nothing state-dependent enters the law mid-flight.
+- **Batch service, pathwise IPA**: not guaranteed unbiased. The batch
+  size is integer-valued: a perturbation that reorders an arrival against
+  a batch formation changes the composition by whole jobs, and the path
+  jumps. Unlike state-reading laws, `branch_world` does *not* refuse
+  batching models — the fragility is documented here, not enforced —
+  because statistics insensitive to composition may still differentiate
+  cleanly; the claim is the user's to make.
+- **Batch service, SPA**: valid — a swap's correction conditions on the
+  realized order, so the recomposition a swap causes sits inside the
+  conditioning, as with a law change. Batch clocks are never re-declared,
+  so these records do not trip `spa_gradient`'s multi-segment refusal.
 
 See [Gradient estimation](gradients.md) for the estimators themselves and
 for the processor-sharing experiment that first demonstrated the IPA

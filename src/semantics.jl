@@ -292,8 +292,22 @@ end
 function family_fire!(::Val{:service}, m, st, key, t, draws, wl, touched)
     _, s, j = key
     _remove!(st.srv[s], j)
-    d = routejob!(m, st, Int(s), j, draws)
-    deposit!(m, st, Int(s), d, j, wl, touched, draws)
+    if haskey(st.batchmembers, j)
+        # A batch completion: the synthetic batch job dissolves and each
+        # member routes individually on its own marks, in gather order. A
+        # member that meets a full :block destination is dropped like a
+        # source arrival (holdable = false) — the batch has fired, so there
+        # is no server left to hold the member.
+        for member in st.batchmembers[j]
+            d = routejob!(m, st, Int(s), member, draws)
+            deposit!(m, st, Int(s), d, member, wl, touched, draws; holdable=false)
+        end
+        delete!(st.jobs, j)
+        delete!(st.batchmembers, j)
+    else
+        d = routejob!(m, st, Int(s), j, draws)
+        deposit!(m, st, Int(s), d, j, wl, touched, draws)
+    end
     return push!(wl, Int(s))
 end
 
@@ -348,6 +362,11 @@ end
 # deposit and the settle cascade — pure state movement; clock lifecycle is
 # derived afterwards from the membership these moves imply.
 
+# `holdable` says whether a job that meets a full :block destination may be
+# held in the origin's server. Every ordinary deposit is holdable; a batch
+# member deposited after its batch fired is not, because the batch job's
+# firing already freed the server — there is nothing left to hold the member,
+# so it drops like a source arrival.
 function deposit!(
     m::QueueGSMP,
     st::QueueState,
@@ -356,7 +375,8 @@ function deposit!(
     j::JobId,
     wl::Vector{Int},
     touched::Set{Int},
-    draws::DrawSource,
+    draws::DrawSource;
+    holdable::Bool=true,
 )
     push!(touched, d)
     stn = m.stations[d]
@@ -399,7 +419,7 @@ function deposit!(
         if length(st.buf[d]) >= stn.capacity
             # A source has no server to hold a blocked job, so an external
             # arrival to a full :block station is lost, not blocked.
-            if stn.overflow == :block && m.stations[origin].kind == :station
+            if holdable && stn.overflow == :block && m.stations[origin].kind == :station
                 push!(st.hold[origin], j)
                 push!(st.blocked[d], (Int32(origin), j))
                 push!(touched, origin)
@@ -499,11 +519,35 @@ function settle!(
         end
     end
 
-    # 2. Dispatch: fill free slots in discipline order.
-    while _freeslots(m, st, q) > 0
-        j = selectjob!(m, st, q, draws)
-        j === nothing && break
-        push!(st.srv[q], j)
+    # 2. Dispatch: fill free slots in discipline order. A batching station
+    # instead gathers waiting jobs into a synthetic batch job: once at least
+    # `min` jobs wait, a free server takes up to `max` of them in discipline
+    # order (draw-free under FCFS, the only discipline C6 admits), and one
+    # fresh job id carrying the mark `batchsize` enters service for them.
+    # Members leave the buffer but stay in st.jobs, keyed through
+    # st.batchmembers — like stashed join siblings, they are still in the
+    # system. With fewer than `min` waiting, the server idles; no clock is
+    # needed for the forming batch because arrivals re-run settle.
+    b = stn.batching
+    if b === nothing
+        while _freeslots(m, st, q) > 0
+            j = selectjob!(m, st, q, draws)
+            j === nothing && break
+            push!(st.srv[q], j)
+        end
+    else
+        while _freeslots(m, st, q) > 0 && length(st.buf[q]) >= b.min
+            k = min(length(st.buf[q]), b.max)
+            members = JobId[]
+            for _ in 1:k
+                push!(members, selectjob!(m, st, q, draws))
+            end
+            batch = st.next_id
+            st.next_id += 1
+            st.jobs[batch] = (batchsize=Float64(k),)
+            st.batchmembers[batch] = members
+            push!(st.srv[q], batch)
+        end
     end
 
     # 3. Unblock: freed waiting room admits blocked transfers, longest-blocked

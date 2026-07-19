@@ -10,6 +10,31 @@ and this project adheres to
 
 ### Added
 
+- Batch service: `station!(...; batching = Batching(min, max))` gathers
+  waiting jobs into a synthetic batch job served by one clock. The batch
+  carries the mark `batchsize`, frozen at enabling, so existing
+  mark-reading service laws set the batch's processing time; on
+  completion the members route individually on their own marks and
+  draws. `Batching()` defaults to the gather-everything rule (Inoue's
+  dynamic batching); `min = max = K` is classical fixed-size batch
+  service.
+- Compile check C6: batching requires the non-preemptive `:back`-insert
+  FCFS discipline; the `batchsize` mark is visible only to the batch
+  station's own service law.
+- Batch-service semantics decisions: members keep patience clocks while
+  a batch forms (reneging before formation), batch jobs never get
+  patience clocks, and a member that meets a full `:block` destination
+  is dropped like a source arrival — after the batch fires, no server
+  is left to hold it. `number_in_system` counts members, not batch
+  bookkeeping jobs. Batch composition is deterministic given state, so
+  nothing new is recorded and replay equality holds.
+- Batch-service tests: degenerate `min = max = 1` record equality with
+  the plain FCFS station, M/M^[K]/1 and Inoue (2021) gather-all oracles,
+  reneging and blocking interactions, replay/debug membership, and C6
+  messages.
+- Manual page on batch service with Inoue's gather-everything model as
+  the worked illustration; the estimator-validity table gains a
+  batch-service row (score valid, IPA not guaranteed).
 - State-dependent service laws: the expression atoms `InService(station)`
   and `InBuffer(station)` let a station's service law read live occupancy
   as `Float64` counts.

@@ -57,3 +57,13 @@ RoundRobin
 ```@docs
 FCFSUnblock
 ```
+
+## Batch service
+
+A batching policy is a value passed to [`station!`](@ref), like a
+discipline; the [batch service manual page](../manual/batching.md) walks
+through the semantics.
+
+```@docs
+Batching
+```

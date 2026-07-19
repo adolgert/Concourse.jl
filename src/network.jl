@@ -182,6 +182,39 @@ fixed by the interpreter. This is the only policy so far.
 """
 struct FCFSUnblock <: UnblockPolicy end
 
+# Batch service: a free server gathers between `min` and `max` waiting jobs
+# into one synthetic batch job served by a single clock; on completion the
+# members route individually. `min = 1, max = typemax(Int)` is the
+# gather-everything rule.
+"""
+    Batching(; min = 1, max = typemax(Int))
+
+Batch-service policy for [`station!`](@ref): a free server waits until at
+least `min` jobs are in the buffer, then gathers up to `max` of them (in
+discipline order) into one batch served by a single clock. The batch is a
+synthetic job carrying the mark `batchsize`, frozen at enabling like any
+mark, so the service law may read `Mark(:batchsize)`. Members waiting for
+a batch to form keep their patience clocks; the batch job itself never
+gets one. On completion each member routes individually on its own marks
+and draws; a member that meets a full `:block` destination is dropped
+like a source arrival, because the batch's firing already freed the
+server — nothing is left to hold the member. Requires the [`FCFS`](@ref)
+discipline (check C6).
+
+The defaults `min = 1, max = typemax(Int)` are the gather-everything rule
+(dynamic batching); `min = max = K` is classical fixed-size batch service
+(M/M``^{[K]}``/1).
+"""
+struct Batching
+    min::Int
+    max::Int
+    function Batching(; min::Int=1, max::Int=typemax(Int))
+        1 <= min || throw(ArgumentError("Batching needs min >= 1"))
+        min <= max || throw(ArgumentError("Batching needs min <= max"))
+        return new(min, max)
+    end
+end
+
 struct SurfaceStation
     name::Symbol
     kind::Symbol              # :source | :station | :sink
@@ -196,6 +229,7 @@ struct SurfaceStation
     renege_to::Union{Symbol,Nothing}
     branches::Vector{Symbol}              # forks only
     parts::Int                            # joins only
+    batching::Union{Batching,Nothing}     # stations only
 end
 
 """
@@ -269,6 +303,7 @@ function source!(
             nothing,
             Symbol[],
             0,
+            nothing,
         ),
     )
 end
@@ -276,7 +311,7 @@ end
 """
     station!(net, name::Symbol; service, discipline=FCFS(), servers=1,
              capacity=typemax(Int), overflow=:drop, unblock=FCFSUnblock(),
-             patience=nothing, renege_to=nothing)
+             patience=nothing, renege_to=nothing, batching=nothing)
 
 Add a service station called `name` to the network.
 
@@ -305,6 +340,13 @@ Add a service station called `name` to the network.
 - `patience` and `renege_to` come together. `patience` is a law for how
   long a job will wait before abandoning the line, and `renege_to` names
   the station the abandoning job goes to. Jobs in service do not renege.
+- `batching`: a [`Batching`](@ref) policy, or `nothing` (the default) for
+  one job per server. Under batching, a free server gathers between
+  `min` and `max` waiting jobs (in discipline order) into one batch
+  served by a single clock; the batch carries the mark `batchsize` for
+  the service law to read, and on completion the members route
+  individually. Batching requires the [`FCFS`](@ref) discipline
+  (check C6).
 
 A station needs a [`route!`](@ref) saying where finished jobs go.
 """
@@ -319,6 +361,7 @@ function station!(
     unblock::UnblockPolicy=FCFSUnblock(),
     patience::Union{AbstractLaw,Nothing}=nothing,
     renege_to::Union{Symbol,Nothing}=nothing,
+    batching::Union{Batching,Nothing}=nothing,
 )
     (patience === nothing) == (renege_to === nothing) ||
         throw(ArgumentError("patience and renege_to come together"))
@@ -338,6 +381,7 @@ function station!(
             renege_to,
             Symbol[],
             0,
+            batching,
         ),
     )
 end
@@ -366,6 +410,7 @@ function sink!(net::QueueNetwork, name::Symbol)
             nothing,
             Symbol[],
             0,
+            nothing,
         ),
     )
 end
@@ -402,6 +447,7 @@ function fork!(net::QueueNetwork, name::Symbol; branches)
             nothing,
             collect(Symbol, branches),
             0,
+            nothing,
         ),
     )
 end
@@ -434,6 +480,7 @@ function join!(net::QueueNetwork, name::Symbol; parts::Int)
             nothing,
             Symbol[],
             parts,
+            nothing,
         ),
     )
 end
@@ -478,6 +525,7 @@ struct CompiledStation
     renege::Int32             # destination index; 0 when no patience law
     branches::Vector{Int32}   # forks only
     parts::Int                # joins only
+    batching::Union{Batching,Nothing}   # stations only
 end
 
 """
@@ -544,7 +592,9 @@ first violation:
   deadlock;
 - station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is read only by
   the service law of a station, and every occupancy read names a declared
-  station (check C5).
+  station (check C5);
+- every station that declares [`Batching`](@ref) uses the non-preemptive
+  FCFS discipline (check C6).
 """
 function compile(net::QueueNetwork)
     names = Dict{Symbol,Int}(s.name => i for (i, s) in enumerate(net.stations))
@@ -571,6 +621,7 @@ function compile(net::QueueNetwork)
                 renege,
                 Int32[names[b] for b in s.branches],
                 s.parts,
+                s.batching,
             ),
         )
     end
@@ -640,14 +691,17 @@ function check_network(net::QueueNetwork, names, params)
     end
     check_blocking_acyclic(net)
     check_state_reads(net, names)
+    check_batching(net)
+    # A batch station's synthetic batch job carries the mark `batchsize`, so
+    # its service law alone may read that mark on top of what sources produce.
+    batch_marks = union(produced_marks, (:batchsize,))
     for s in net.stations
         s.renege_to === nothing ||
             haskey(names, s.renege_to) ||
             throw(ArgumentError("renege_to at $(s.name) targets unknown station $(s.renege_to)"))
-        laws = AbstractLaw[]
-        s.service === nothing || push!(laws, s.service)
-        s.patience === nothing || push!(laws, s.patience)
-        for law in laws
+        service_marks = s.batching === nothing ? produced_marks : batch_marks
+        for (law, allowed) in ((s.service, service_marks), (s.patience, produced_marks))
+            law === nothing && continue
             for p in reads_params(law)
                 haskey(params, p) ||
                     throw(ArgumentError("law at $(s.name) reads unknown parameter $p"))
@@ -655,7 +709,7 @@ function check_network(net::QueueNetwork, names, params)
             # C2, conservatively: any read mark must be produced by some
             # source. The routing-graph dataflow refinement is future work.
             for mk in reads_marks(law)
-                mk in produced_marks ||
+                mk in allowed ||
                     throw(ArgumentError("law at $(s.name) reads mark $mk no source produces"))
             end
         end
@@ -724,6 +778,27 @@ function check_state_reads(net::QueueNetwork, names)
                     ),
                 )
             end
+        end
+    end
+    return nothing
+end
+
+# Check C6: batch formation gathers waiting jobs in discipline order without
+# consuming draws, and a batch in service must never be preempted or
+# reordered — guarantees only the non-preemptive :back-insert FCFS
+# discipline gives in v1. Batching is a station!-only keyword, so no
+# kind check is needed here.
+function check_batching(net::QueueNetwork)
+    for s in net.stations
+        s.batching === nothing && continue
+        if s.discipline.name != :fcfs
+            throw(
+                ArgumentError(
+                    "station $(s.name) declares batching under the " *
+                    "$(s.discipline.name) discipline; batching requires the " *
+                    "non-preemptive :back-insert FCFS discipline (check C6)",
+                ),
+            )
         end
     end
     return nothing
