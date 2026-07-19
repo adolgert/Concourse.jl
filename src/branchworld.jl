@@ -58,6 +58,21 @@ function _assert_thetafree_marks(m::QueueGSMP)
             )
         end
     end
+    # Population mark laws are mark laws; a θ-reading initial mark would add
+    # the same unimplemented derivative term as a θ-reading source mark.
+    for p in m.population
+        p.mark === nothing && continue
+        for (name, law) in p.mark.laws
+            ps = reads_params(law)
+            isempty(ps) || throw(
+                ArgumentError(
+                    "branchable worlds support θ-free marks only for now; initial " *
+                    "mark $name of the population at $(m.stations[p.station].name) " *
+                    "reads parameters $(sort!(collect(ps)))",
+                ),
+            )
+        end
+    end
     return nothing
 end
 
@@ -101,6 +116,11 @@ every estimator, and that term is not implemented. A service law that reads
 station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is refused too:
 pathwise branching is not guaranteed unbiased when event reordering changes
 an occupancy-dependent law — use the score estimator for those models.
+
+A [`populate!`](@ref) population follows the same rules: a θ-reading
+initial mark law is refused like a source's, and because a branchable world
+seeds from the zero-argument [`initial_state`](@ref), any *drawn* initial
+mark fails loudly at seeding — only draw-free populations branch.
 
 # Example
 

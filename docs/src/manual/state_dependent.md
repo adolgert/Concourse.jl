@@ -240,6 +240,13 @@ model features; later capabilities will extend it.
   racing models. Canceled clocks are removed, never re-declared, so these
   records do not trip `spa_gradient`'s multi-segment refusal.
 
+[Closed networks](closed_networks.md) (`populate!`) earn no row: initial
+marks are ordinary recorded draws, consumed once at ``t = 0`` and replayed
+from the record's `init` slot, so seeding introduces no new event-order
+discontinuity and no new likelihood term. A θ-reading *initial* mark law
+falls under the θ-dependent-mark row above — `branch_world` refuses it
+exactly as it refuses a source's.
+
 See [Gradient estimation](gradients.md) for the estimators themselves and
 for the processor-sharing experiment that first demonstrated the IPA
 failure on multi-segment records.

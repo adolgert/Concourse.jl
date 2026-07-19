@@ -786,3 +786,31 @@ function run_cascade!(
     end
     return nothing
 end
+
+# The seeded half of initial_state (the docstring lives on the one-argument
+# method in state.jl; this method is defined here because it runs the settle
+# machinery). Seeded jobs are ordinary jobs: filed into their buffer in
+# declaration order, dispatched by one cascade at t = 0 honoring disciplines
+# and capacities, with every enabled clock's te set to 0.0 so the enable
+# loop in `simulate` needs no special case.
+function initial_state(m::QueueGSMP, ds::DrawSource)
+    st = _empty_state(m)
+    isempty(m.population) && return st
+    wl = Int[]
+    for p in m.population
+        s = Int(p.station)
+        for _ in 1:p.count
+            j = st.next_id
+            st.next_id += 1
+            st.jobs[j] = p.mark === nothing ? NamedTuple() : drawmarks!(ds, p.mark, 0.0)
+            file_into_buffer!(m, st, s, j)
+        end
+        push!(wl, s)
+    end
+    unique!(wl)
+    run_cascade!(m, st, 0.0, ds, wl, Set{Int}(), :fifo)
+    for k in enabled(m, st)
+        st.te[k] = 0.0
+    end
+    return st
+end

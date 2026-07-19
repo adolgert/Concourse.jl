@@ -12,6 +12,11 @@ consumption order (`draws`, a vector of `purpose => value` pairs per
 firing), plus the `horizon` the run covered. `length(rec)` is the number of
 firings.
 
+`init` is the "firing 0" slot: the draws that seeding the network's
+[`populate!`](@ref) population consumed at t = 0 — initial marks in
+declaration order, plus any draw the t = 0 dispatch made. It is empty for
+a network without a population.
+
 The record is the primary observable. Every statistic is a fold of
 [`fire_changes`](@ref) over it, and because the draws are recorded,
 [`replay`](@ref) reproduces the exact state trajectory without touching a
@@ -21,9 +26,10 @@ mutable struct MarkedRecord
     key::Vector{ClockKey}
     time::Vector{Float64}
     draws::Vector{DrawList}
+    init::DrawList
     horizon::Float64
 end
-MarkedRecord() = MarkedRecord(ClockKey[], Float64[], DrawList[], NaN)
+MarkedRecord() = MarkedRecord(ClockKey[], Float64[], DrawList[], DrawList(), NaN)
 
 Base.length(r::MarkedRecord) = length(r.key)
 
@@ -41,7 +47,7 @@ The state trajectory as a fold of `fire_changes` over the record, including
 the initial state; index i+1 is the state just after firing i.
 """
 function replay(m::QueueGSMP, rec::MarkedRecord; worklist::Symbol=:fifo)
-    sts = QueueState[initial_state(m)]
+    sts = QueueState[initial_state(m, replaydraws(INIT_KEY, rec.init, m.params))]
     for i in eachindex(rec.key)
         ds = replaydraws(rec.key[i], rec.draws[i], m.params)
         st, _ = fire_changes(m, sts[end], rec.key[i], rec.time[i], ds; worklist)
@@ -65,7 +71,7 @@ L = time_average(number_in_system, m, rec)   # mean number in system
 ```
 """
 function time_average(g::Function, m::QueueGSMP, rec::MarkedRecord)
-    st = initial_state(m)
+    st = initial_state(m, replaydraws(INIT_KEY, rec.init, m.params))
     acc = 0.0
     tprev = 0.0
     for i in eachindex(rec.key)

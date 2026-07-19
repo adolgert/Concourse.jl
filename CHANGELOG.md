@@ -10,6 +10,41 @@ and this project adheres to
 
 ### Added
 
+- Closed networks: `populate!(net, station, count; mark)` seeds a fixed
+  population at a service station before time zero. Jobs are filed into
+  the buffer in declaration order and dispatched by one settle cascade
+  at t = 0, honoring disciplines and capacities; enabled clocks get
+  enabling time 0 through the ordinary enable loop. Multiple calls
+  compose (multiclass populations), a network with a population needs no
+  source — sourceless networks become legal — and sources and
+  populations may coexist. `stability` returns an empty report for a
+  sourceless network: a closed network cannot be unstable.
+- The record's "firing 0" slot: `MarkedRecord.init` holds the draws that
+  seeding consumed — initial marks in declaration order, plus any t = 0
+  dispatch draw — keyed by the reserved pseudo-clock `(:init, 0, 0)`.
+  `replay` and `time_average` seed the initial state from `rec.init`, a
+  truncated init list errors loudly, and the zero-argument
+  `initial_state` still serves draw-free populations while pointing
+  draw-bearing ones at the record. `replay_model` binds `rec.init`, so
+  the score estimator covers populated models; `live_model` and
+  `branch_world` fail loudly on drawn initial marks, and a θ-reading
+  initial mark law is refused under branching exactly as a source's.
+- Compile check C10: a populated station's counts must fit within
+  `servers + capacity`; a network with neither a source nor a
+  `populate!` entry is still refused.
+- Closed-network tests: the two-station cycle against Buzen's
+  convolution, machine-repairman availability against the birth–death
+  form, multiclass per-class conservation, replay equality through the
+  init draws with the truncated-init failure, mixed open + closed census
+  accounting, a score gradient against finite differences, and the C10
+  and populate! messages verbatim.
+- Manual page on closed networks (`populate!`, the firing-0 record slot,
+  the Buzen/MVA validation pattern, machine-repairman, branching and
+  gradient restrictions); a firing-0 section on the record/replay page;
+  the networks tutorial's closed-population section now builds an
+  interactive-users model instead of calling closed populations
+  inexpressible.
+
 - Sibling cancellation: `join!(net, name; parts, need, cancel)` races a
   fork's siblings as (n, k) redundancy. Under `cancel = :on_completion`
   the `need`-th sibling to reach the join merges the group and cancels

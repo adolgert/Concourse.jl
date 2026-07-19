@@ -200,13 +200,33 @@ and leave. The other classical family is **closed**: a fixed population of
 for "``N`` users at terminals, each thinking, then submitting a job" —
 and its theory (mean value analysis) prices interactive systems.
 
-Concourse's surface language cannot express a closed population today: every
-job is born at a `source!`, and there is no builder that starts jobs *inside*
-the network at time zero. What it can express is the open feedback loop
-above, which captures the same phenomenon — jobs revisiting stations — with
-an open boundary. If your question is "fixed user population, think time,
-response-time law", that is a real limitation of the current surface
-language, not a modeling trick away.
+[`populate!`](@ref) declares exactly that: seed ``N`` jobs *inside* the
+network at time zero, and the network needs no `source!` at all. Four users
+at terminals — a station with four servers, so everyone thinks in parallel —
+submit jobs to one CPU and wait for the answer:
+
+```@example net
+net = QueueNetwork(param_names = (:think, :serve))
+station!(net, :terminals; servers = 4,
+         service = Law(:Exponential, scale = inv(Param(:think))))
+station!(net, :cpu; service = Law(:Exponential, scale = inv(Param(:serve))))
+route!(net, :terminals, Always(:cpu))
+route!(net, :cpu, Always(:terminals))
+populate!(net, :terminals, 4)
+interactive = compile(net)
+
+rec = simulate(interactive, [0.5, 3.0], 2000.0; seed = 9)
+cpu = interactive.names[:cpu]
+time_average(st -> Float64(length(st.buf[cpu]) + length(st.srv[cpu])),
+             interactive, rec)
+```
+
+No job ever enters or leaves — the four circulate forever between thinking
+and computing. The
+[closed networks manual page](../manual/closed_networks.md) develops the
+machinery: multiclass populations with drawn initial marks, the record's
+"firing 0" slot that keeps replay exact, and validation of simulated
+occupancies against the exact product-form answer via Buzen's algorithm.
 
 Routing kernels so far treat all jobs alike. The [next page](marks.md) gives
 jobs identity — classes, sizes, service demands they carry with them.

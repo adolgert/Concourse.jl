@@ -234,6 +234,14 @@ struct SurfaceStation
     batching::Union{Batching,Nothing}     # stations only
 end
 
+# One populate! declaration: `count` jobs seeded at `station` before time
+# zero, each drawing its marks from `mark` (nothing means no marks).
+struct Population
+    station::Symbol
+    count::Int
+    mark::Union{MarkLaw,Nothing}
+end
+
 """
     QueueNetwork(; param_names)
 
@@ -260,9 +268,12 @@ mutable struct QueueNetwork
     param_names::Vector{Symbol}
     stations::Vector{SurfaceStation}
     routes::Dict{Symbol,Kernel}
+    population::Vector{Population}
 end
 function QueueNetwork(; param_names)
-    return QueueNetwork(collect(Symbol, param_names), SurfaceStation[], Dict{Symbol,Kernel}())
+    return QueueNetwork(
+        collect(Symbol, param_names), SurfaceStation[], Dict{Symbol,Kernel}(), Population[]
+    )
 end
 
 function _addstation!(net::QueueNetwork, s::SurfaceStation)
@@ -557,6 +568,41 @@ function route!(net::QueueNetwork, origin::Symbol, kernel::Kernel)
     return net
 end
 
+"""
+    populate!(net, station::Symbol, count::Int; mark = nothing)
+
+Seed `count` jobs at `station` before time zero. The jobs are filed into
+the station's buffer in declaration order and dispatched into service by
+one settle pass at t = 0, honoring the discipline and the capacity; check
+C10 requires the station to have room for them. Multiple calls compose
+(multiclass populations). A network with at least one `populate!` needs no
+source — that is a closed network — and sources and populations may also
+coexist.
+
+- `mark`: an optional [`MarkLaw`](@ref). Each seeded job draws its marks at
+  time zero; the draws are recorded in the record's `init` list (the
+  "firing 0" slot), so [`replay`](@ref) reproduces them without an RNG.
+
+Only a service station can hold a population — populating a source, sink,
+fork, or join is an error.
+"""
+function populate!(
+    net::QueueNetwork, station::Symbol, count::Int; mark::Union{MarkLaw,Nothing}=nothing
+)
+    count >= 1 || throw(ArgumentError("populate! needs count >= 1, got $count"))
+    i = findfirst(s -> s.name == station, net.stations)
+    i === nothing && throw(ArgumentError("populate! targets unknown station $station"))
+    kind = net.stations[i].kind
+    kind == :station || throw(
+        ArgumentError(
+            "populate! targets $station, which is a $kind; only a service " *
+            "station can hold an initial population",
+        ),
+    )
+    push!(net.population, Population(station, count, mark))
+    return net
+end
+
 # ---------------------------------------------------------------------------
 # Compilation: symbols become indices, the network becomes a value the
 # interpreter, the checker, and the estimators all read.
@@ -594,6 +640,15 @@ struct CompiledStation
     batching::Union{Batching,Nothing}   # stations only
 end
 
+# A populate! entry in station-index form, in declaration order — the order
+# initial_state seeds jobs and draws their marks, which is the order the
+# record's init list replays.
+struct CompiledPopulation
+    station::Int32
+    count::Int
+    mark::Union{MarkLaw,Nothing}
+end
+
 """
     QueueGSMP
 
@@ -610,6 +665,9 @@ lists the stations whose service law reads [`InService`](@ref) of station
 every resident's speed reads the resident count), and `buf_readers[s]`
 likewise for [`InBuffer`](@ref). [`fire_changes`](@ref) re-evaluates a
 reader's surviving service clocks whenever a watched count changes.
+
+`population` holds the network's [`populate!`](@ref) entries in declaration
+order, with stations as indices; [`initial_state`](@ref) seeds them.
 """
 struct QueueGSMP
     stations::Vector{CompiledStation}
@@ -617,6 +675,7 @@ struct QueueGSMP
     params::Dict{Symbol,Int}
     srv_readers::Vector{Vector{Int}}
     buf_readers::Vector{Vector{Int}}
+    population::Vector{CompiledPopulation}
 end
 
 function _compilekernel(k::Always, names)
@@ -651,6 +710,11 @@ become integer indices and parameter names become positions in `θ`.
 first violation:
 
 - every route target and renege destination is a declared station;
+- the network has at least one source or one [`populate!`](@ref) entry —
+  otherwise it can never contain a job;
+- every populated station has room for its population:
+  the counts placed at it sum to at most `servers + capacity` when the
+  capacity is finite (check C10);
 - every source, station, and join has a route, and no sink or fork has one;
 - deterministic kernels ([`ByMark`](@ref)) read marks only;
 - every law reads only declared parameters and marks some source produces;
@@ -724,14 +788,46 @@ function compile(net::QueueNetwork)
     end
     foreach(v -> unique!(sort!(v)), srv_readers)
     foreach(v -> unique!(sort!(v)), buf_readers)
-    return QueueGSMP(stations, names, params, srv_readers, buf_readers)
+    population = CompiledPopulation[
+        CompiledPopulation(Int32(names[p.station]), p.count, p.mark) for p in net.population
+    ]
+    return QueueGSMP(stations, names, params, srv_readers, buf_readers, population)
 end
 
 # Check C1 (structure) and the parts of C2 (mark dataflow) and the randomness
 # rules that need no traffic equations. Total functions of the value, per
 # queue_layers.tex §3.7 — possible only because A3 made the laws inspectable.
 function check_network(net::QueueNetwork, names, params)
+    any(s -> s.kind == :source, net.stations) ||
+        !isempty(net.population) ||
+        throw(
+            ArgumentError(
+                "the network has no source and no populate! entry, so it can " *
+                "never contain a job",
+            ),
+        )
+    # Check C10: a populated station must have room for its population at
+    # t = 0 — the seeded jobs are ordinary residents, so at most
+    # servers + capacity of them fit (typemax capacity is unbounded room).
+    placed = Dict{Symbol,Int}()
+    for p in net.population
+        placed[p.station] = get(placed, p.station, 0) + p.count
+    end
+    for s in net.stations
+        total = get(placed, s.name, 0)
+        (total == 0 || s.capacity == typemax(Int)) && continue
+        room = s.servers + s.capacity
+        total <= room || throw(
+            ArgumentError(
+                "populate! places $total jobs at $(s.name), which holds at " *
+                "most servers + capacity = $room jobs (check C10)",
+            ),
+        )
+    end
     produced_marks = Set{Symbol}()
+    for p in net.population
+        p.mark === nothing || union!(produced_marks, marknames(p.mark))
+    end
     for s in net.stations
         if s.kind == :fork
             haskey(net.routes, s.name) &&
@@ -783,10 +879,14 @@ function check_network(net::QueueNetwork, names, params)
                     throw(ArgumentError("law at $(s.name) reads unknown parameter $p"))
             end
             # C2, conservatively: any read mark must be produced by some
-            # source. The routing-graph dataflow refinement is future work.
+            # source or populate! entry. The routing-graph dataflow
+            # refinement is future work.
             for mk in reads_marks(law)
-                mk in allowed ||
-                    throw(ArgumentError("law at $(s.name) reads mark $mk no source produces"))
+                mk in allowed || throw(
+                    ArgumentError(
+                        "law at $(s.name) reads mark $mk no source or populate! produces"
+                    ),
+                )
             end
         end
     end
@@ -801,6 +901,20 @@ end
 # sources, sinks, forks, and joins hold no jobs to count.
 function check_state_reads(net::QueueNetwork, names)
     kindof = Dict(s.name => s.kind for s in net.stations)
+    # Population mark laws are mark laws: their draws land in the record's
+    # init list, so the same scope rule applies.
+    for p in net.population
+        p.mark === nothing && continue
+        for (mk, law) in p.mark.laws
+            isempty(reads_state(law)) || throw(
+                ArgumentError(
+                    "mark law $mk of the population at $(p.station) reads station " *
+                    "state; state in a mark law would put station state into the " *
+                    "record's mark draws, breaking replay — amendment A4 (check C5)",
+                ),
+            )
+        end
+    end
     for s in net.stations
         if s.mark !== nothing
             for (mk, law) in s.mark.laws
@@ -1017,8 +1131,13 @@ warning at ρ ≥ 1. Mark-dependent routing, mark-reading service laws, and
 state-reading service laws ([`InService`](@ref)/[`InBuffer`](@ref)) have no
 static visit ratios or means, so those stations are skipped — the census
 principle: report what the combinator values expose, silently invent nothing.
+
+A network with no sources (a closed network, populated by
+[`populate!`](@ref)) reports nothing: with a fixed population there is no
+arrival rate to outrun, so a closed network cannot be unstable.
 """
 function stability(m::QueueGSMP, θ::AbstractVector)
+    any(stn -> stn.kind == :source, m.stations) || return Tuple{Symbol,Float64}[]
     n = length(m.stations)
     λ = zeros(n)
     for (s, stn) in enumerate(m.stations)

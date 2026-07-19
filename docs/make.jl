@@ -35,6 +35,7 @@ makedocs(
             "manual/checking.md",
             "manual/state_dependent.md",
             "manual/batching.md",
+            "manual/closed_networks.md",
             "manual/bcmp_hpc.md",
         ],
         "Reference" => [

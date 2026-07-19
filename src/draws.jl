@@ -7,6 +7,12 @@
 const DrawList = Vector{Pair{Symbol,Float64}}
 const StreamKey = Tuple{ClockKey,Symbol}
 
+# The reserved pseudo-clock that owns the draws of "firing 0" — the initial
+# mark and dispatch draws a population consumes at t = 0. :init is not a
+# clock family, so this key can never be enabled or fired; it exists only to
+# key the init draw streams and label the record's init list.
+const INIT_KEY = (:init, Int32(0), Int64(0))
+
 """
     DrawSource
 
