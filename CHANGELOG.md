@@ -10,6 +10,54 @@ and this project adheres to
 
 ### Added
 
+- Round-based token service: `station!(...; rounds = Rounds(policy,
+  duration, work))` serves a station in synchronous rounds. At each
+  boundary the `RoundPolicy` plans the round through a read-only
+  `RoundView` — admissions (waiting → active), evictions (active →
+  waiting with the work counters RESET, Dong's refresh semantics), and
+  per-active-job integer token allocations, engine-enforced within
+  `0 ≤ alloc ≤ remaining` per phase — and one station-level `:round`
+  clock runs it under the `duration` law, which reads the plan's frozen
+  aggregates (`tokens`, `requests`, per-phase sums) as pseudo-marks. At
+  the firing allocations are credited, exhausted jobs route onward
+  (dropped at a full `:block` destination, the batch-member rule), and
+  the next round is planned at the same instant, so rounds chain with no
+  gap. Per-job work counters and the committed plan live in `QueueState`
+  (`work`, `roundplan`), replay-owned; policy randomness flows through
+  the firing's draw source, so replay reproduces every plan (I1/I4).
+  Waiting jobs keep patience clocks; an evicted job re-files with a
+  fresh one. `populate!` may seed round stations; a canceled sibling
+  active in a round leaves the plan's aggregates frozen.
+- Shipped round policies: Dai et al.'s four batch composition rules
+  (`FasterTransformerRule`, `VanillaVLLM`, `Orca`, `Sarathi`, each with
+  a token `budget` and optional batch-size cap `kmax`), the
+  `ClassPriority` wrapper for strict class priority over any of them,
+  and Dong & Cao's `ClassBudgets` (Algorithm 1: per-class activation
+  budgets, FIFO, no memory check) and `FlowControl` (Algorithm 2: drawn
+  global activation budget, KV accounting `U = Σ(l + generated + 1)`,
+  LIFO eviction with full progress reset on overflow).
+- Compile checks C12 (round-station shape: non-preemptive FCFS, no
+  `batching`, `servers = 1`, no `service` law, `work` marks produced
+  upstream — plus the runtime integer-`≥ 0` check at admission) and C13
+  (the duration law reads only the plan's aggregates, never job marks
+  or station state).
+- Expression algebra: `ceil` and `floor` on `ScalarExpr`, so Dai's
+  staircase `c + a * ceil(Mark(:tokens) / b0)` is a plain duration
+  expression; both are flat almost everywhere, so θ inside them
+  contributes no pathwise derivative — exact, not an approximation.
+- Estimator scope: θ in arrival, mark, or remark laws feeding a round
+  station keeps a valid score over records; a `Dirac` round duration has
+  no score channel and pathwise IPA is not certified. `branch_world`
+  refuses models containing round stations in v1.
+- Round tests: the degenerate M/D/1 (Sarathi budget 1 on unit work)
+  against Pollaczek–Khinchine and record-level against its plain FCFS
+  twin at the same seed; replay equality and debug membership on
+  admission/eviction traffic, with FlowControl's LIFO reset visible in
+  the record; an impure test policy caught by the replay harness; the
+  C12/C13 messages verbatim; fractional work marks erroring at
+  admission; chained rounds at sustained overload staying inside the
+  cascade fuel bound.
+
 - Mark redraw on deposit: `station!(...; remark = (name = Law(...), ...))`
   declares laws (a `NamedTuple` or a `MarkLaw`) drawn when a job is
   deposited into the station from outside — filing into the buffer, or

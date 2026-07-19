@@ -225,6 +225,30 @@ function remark_tandem(; thetafree=false)
     return compile(net)
 end
 
+# Degenerate M/D/1 as a round station (capability 6): every job carries one
+# unit of single-phase work, Sarathi with token budget 1 admits everyone and
+# serves exactly one token per round in FCFS order, and the Dirac round
+# duration makes the station literally M/D/1 — the engine must add nothing
+# when the policy degenerates. `s` is the deterministic service time.
+function round_md1(; s=0.5, budget=1)
+    net = QueueNetwork(; param_names=(:lambda,))
+    source!(
+        net,
+        :arrive;
+        interarrival=Law(:Exponential; scale=inv(Param(:lambda))),
+        mark=MarkLaw(; w=Law(:Dirac; value=Const(1.0))),
+    )
+    station!(
+        net,
+        :gpu;
+        rounds=Rounds(; policy=Sarathi(; budget), duration=Law(:Dirac; value=Const(s)), work=(:w,)),
+    )
+    sink!(net, :done)
+    route!(net, :arrive, Always(:gpu))
+    route!(net, :gpu, Always(:done))
+    return compile(net)
+end
+
 # CONCOURSE_TEST_QUICK=1 shrinks replication counts for fast local iteration.
 const QUICK = get(ENV, "CONCOURSE_TEST_QUICK", "0") == "1"
 nreps(n) = QUICK ? max(4, n ÷ 8) : n

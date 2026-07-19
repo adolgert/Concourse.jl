@@ -45,6 +45,25 @@ mutable struct ConcourseWorld{C}
     time::Float64
 end
 
+# Round stations stay out of branchable worlds in v1: a round plan is a
+# deterministic map of the whole queue composition, so pathwise branching
+# across event reorderings has no certified unbiasedness argument, and a
+# Dirac round duration bears no density for the score channel either. Score
+# gradients for θ in the arrival, mark, or remark laws feeding a round
+# station remain available over records (replay_model).
+function _assert_no_rounds(m::QueueGSMP)
+    for stn in m.stations
+        stn.rounds === nothing || throw(
+            ArgumentError(
+                "branchable worlds do not support round stations in v1; station " *
+                "$(stn.name) declares rounds — use the score estimator over records " *
+                "for θ in the laws feeding it",
+            ),
+        )
+    end
+    return nothing
+end
+
 function _assert_thetafree_marks(m::QueueGSMP)
     # Remark laws are mark laws drawn at deposit instead of at birth; a
     # θ-reading remark would add the same unimplemented derivative term as a
@@ -121,7 +140,10 @@ refused with an `ArgumentError`: its own derivative would add a term to
 every estimator, and that term is not implemented. A service law that reads
 station occupancy ([`InService`](@ref)/[`InBuffer`](@ref)) is refused too:
 pathwise branching is not guaranteed unbiased when event reordering changes
-an occupancy-dependent law — use the score estimator for those models.
+an occupancy-dependent law — use the score estimator for those models. A
+model containing a round station ([`Rounds`](@ref)) is refused in v1 for
+the same reordering reason; score gradients over its records remain valid
+for θ in the arrival, mark, or remark laws feeding it.
 
 A [`populate!`](@ref) population follows the same rules: a θ-reading
 initial mark law is refused like a source's, and because a branchable world
@@ -138,6 +160,7 @@ res = ClockGradients.branching_gradient(
 ```
 """
 function branch_world(m::QueueGSMP, θ::AbstractVector; seed::Integer, method=NextReactionMethod())
+    _assert_no_rounds(m)
     _assert_thetafree_marks(m)
     _assert_stateless_service(m)
     rng = Xoshiro(seed)

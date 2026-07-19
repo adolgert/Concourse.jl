@@ -30,6 +30,7 @@ using CompetingClocks:
     DirectMethod
 
 include("expr.jl")
+include("rounds.jl")
 include("network.jl")
 include("state.jl")
 include("draws.jl")
@@ -45,6 +46,10 @@ export reads_params, reads_marks, reads_time, reads_state
 # The surface language
 export QueueNetwork, source!, station!, sink!, fork!, join!, route!, populate!, compile
 export Batching
+# Round-based token service (capability 6)
+export Rounds, RoundPolicy, RoundView, RoundJob, RoundPlan, plan_round
+export FasterTransformerRule, VanillaVLLM, Orca, Sarathi, ClassPriority
+export ClassBudgets, FlowControl
 export FCFS, LCFS, SIRO, Priority, ProcessorSharing, SRPT
 export Always, ByMark, Probabilistic, RoundRobin, FCFSUnblock
 # The IR and its contract functions

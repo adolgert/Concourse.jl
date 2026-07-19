@@ -233,6 +233,7 @@ struct SurfaceStation
     cancel::Symbol                        # joins only: :none | :on_completion | :on_start
     batching::Union{Batching,Nothing}     # stations only
     remark::Union{MarkLaw,Nothing}        # stations only: mark redraw on deposit
+    rounds::Union{Rounds,Nothing}         # stations only: round-based token service
 end
 
 # One populate! declaration: `count` jobs seeded at `station` before time
@@ -321,19 +322,22 @@ function source!(
             :none,
             nothing,
             nothing,
+            nothing,
         ),
     )
 end
 
 """
-    station!(net, name::Symbol; service, discipline=FCFS(), servers=1,
+    station!(net, name::Symbol; service=nothing, discipline=FCFS(), servers=1,
              capacity=typemax(Int), overflow=:drop, unblock=FCFSUnblock(),
              patience=nothing, renege_to=nothing, batching=nothing,
-             remark=nothing)
+             remark=nothing, rounds=nothing)
 
 Add a service station called `name` to the network.
 
-- `service`: the service-time law, required. It may read parameters, the
+- `service`: the service-time law, required unless `rounds` is given (a
+  round station's duration lives in its [`Rounds`](@ref) config, check
+  C12). It may read parameters, the
   job's marks, and the enabling time. Alone among laws it may also read
   live station occupancy through [`InService`](@ref)/[`InBuffer`](@ref)
   (check C5); such a law is re-evaluated whenever a watched count changes,
@@ -379,6 +383,14 @@ Add a service station called `name` to the network.
   mark draw; a remark law may not read station state (check C11), and a
   remark-only mark is readable at this station and downstream of it,
   never upstream.
+- `rounds`: a [`Rounds`](@ref) config, or `nothing` (the default). Under
+  rounds the station serves in synchronous rounds: at each boundary the
+  config's [`RoundPolicy`](@ref) admits and evicts jobs and allocates
+  integer tokens to active ones, one station-level clock runs the round
+  under the config's duration law, and per-job work counters persist
+  across rounds. Check C12 fixes the shape — FCFS, no `batching`,
+  `servers = 1`, no `service` law — and the config's `work` marks must
+  be produced upstream and be integers ≥ 0 at admission.
 
 A station needs a [`route!`](@ref) saying where finished jobs go.
 """
@@ -387,7 +399,7 @@ function station!(
     name::Symbol;
     discipline::Discipline=FCFS(),
     servers::Int=1,
-    service::AbstractLaw,
+    service::Union{AbstractLaw,Nothing}=nothing,
     capacity::Int=typemax(Int),
     overflow::Symbol=:drop,
     unblock::UnblockPolicy=FCFSUnblock(),
@@ -395,9 +407,13 @@ function station!(
     renege_to::Union{Symbol,Nothing}=nothing,
     batching::Union{Batching,Nothing}=nothing,
     remark::Union{MarkLaw,NamedTuple,Nothing}=nothing,
+    rounds::Union{Rounds,Nothing}=nothing,
 )
     (patience === nothing) == (renege_to === nothing) ||
         throw(ArgumentError("patience and renege_to come together"))
+    service === nothing &&
+        rounds === nothing &&
+        throw(ArgumentError("station $name needs a service law (or a rounds config)"))
     rml = remark isa NamedTuple ? MarkLaw(; remark...) : remark
     return _addstation!(
         net,
@@ -419,6 +435,7 @@ function station!(
             :none,
             batching,
             rml,
+            rounds,
         ),
     )
 end
@@ -449,6 +466,7 @@ function sink!(net::QueueNetwork, name::Symbol)
             0,
             0,
             :none,
+            nothing,
             nothing,
             nothing,
         ),
@@ -496,6 +514,7 @@ function fork!(net::QueueNetwork, name::Symbol; branches)
             0,
             0,
             :none,
+            nothing,
             nothing,
             nothing,
         ),
@@ -572,6 +591,7 @@ function join!(net::QueueNetwork, name::Symbol; parts::Int, need::Int=parts, can
             parts,
             need,
             cancel,
+            nothing,
             nothing,
             nothing,
         ),
@@ -662,6 +682,7 @@ struct CompiledStation
     cancel_join::Int32
     batching::Union{Batching,Nothing}   # stations only
     remark::Union{MarkLaw,Nothing}      # stations only: mark redraw on deposit
+    rounds::Union{Rounds,Nothing}       # stations only: round-based token service
 end
 
 # A populate! entry in station-index form, in declaration order — the order
@@ -761,6 +782,13 @@ first violation:
   station (check C5);
 - every station that declares [`Batching`](@ref) uses the non-preemptive
   FCFS discipline (check C6);
+- every station that declares [`Rounds`](@ref) has the round-station
+  shape — non-preemptive `:back`-insert FCFS, no `batching`,
+  `servers = 1`, no `service` law — and its `work` marks are produced
+  upstream (check C12);
+- every rounds duration law reads only the plan's frozen aggregates —
+  `tokens`, `requests`, and the per-phase sums named by the `work`
+  marks — and no station state (check C13);
 - remark laws obey source-mark-law scope — no station-state reads
   (check C11) — and read only marks the job carries *before* the redraw;
   a remark-only mark is readable at the remark station and downstream of
@@ -803,6 +831,7 @@ function compile(net::QueueNetwork; allow_blocking_cycles::Bool=false)
                 cj,
                 s.batching,
                 s.remark,
+                s.rounds,
             ),
         )
     end
@@ -907,6 +936,7 @@ function check_network(net::QueueNetwork, names, params; allow_blocking_cycles::
     allow_blocking_cycles || check_blocking_acyclic(net)
     check_state_reads(net, names)
     check_batching(net)
+    check_rounds(net)
     # Mark redraw on deposit: a remark-produced mark exists on jobs only from
     # the redraw onward, so its availability is placement-aware — the remark
     # station itself and everything downstream — while source and populate!
@@ -938,6 +968,44 @@ function check_network(net::QueueNetwork, names, params; allow_blocking_cycles::
                     ),
                 )
             end
+        end
+        # A round station's work marks are its admission-time inputs, so the
+        # same availability census applies (check C12); its duration law is
+        # evaluated against the plan's frozen aggregates only, never job
+        # marks or live state (check C13).
+        if s.rounds !== nothing
+            for mk in s.rounds.work
+                mk in avail || throw(
+                    ArgumentError(
+                        "rounds at $(s.name) names work mark $mk no source, " *
+                        "populate!, or upstream remark produces (check C12)",
+                    ),
+                )
+            end
+            dur = s.rounds.duration
+            for p in reads_params(dur)
+                haskey(params, p) || throw(
+                    ArgumentError("rounds duration law at $(s.name) reads unknown parameter $p")
+                )
+            end
+            agg = union(Set{Symbol}((:tokens, :requests)), Set{Symbol}(s.rounds.work))
+            for mk in reads_marks(dur)
+                mk in agg || throw(
+                    ArgumentError(
+                        "rounds duration law at $(s.name) reads mark $mk, which is not " *
+                        "a round aggregate; the duration law reads only the plan's " *
+                        "frozen aggregates — tokens, requests, and the per-phase sums " *
+                        "$(Tuple(s.rounds.work)) (check C13)",
+                    ),
+                )
+            end
+            isempty(reads_state(dur)) || throw(
+                ArgumentError(
+                    "rounds duration law at $(s.name) reads station state; a round's " *
+                    "duration is frozen at the boundary and reads only the plan's " *
+                    "aggregates (check C13)",
+                ),
+            )
         end
         # Remark laws read the job's PRE-redraw marks, so their census is the
         # availability just before the redraw: sources, populations, and
@@ -1122,6 +1190,46 @@ function check_batching(net::QueueNetwork)
                 ),
             )
         end
+    end
+    return nothing
+end
+
+# Check C12, the structural half: round service composes with exactly the
+# plain FCFS station shape. The plan is committed in FCFS view order without
+# draws, active jobs must never be preempted or reordered (the C6 argument),
+# the one round clock IS the server, batch formation is the policy's
+# business, and the duration lives in the Rounds config, not a service law.
+function check_rounds(net::QueueNetwork)
+    for s in net.stations
+        s.rounds === nothing && continue
+        s.service === nothing || throw(
+            ArgumentError(
+                "station $(s.name) declares both service and rounds; a round " *
+                "station takes its duration from the Rounds config (check C12)",
+            ),
+        )
+        if s.discipline.name != :fcfs
+            throw(
+                ArgumentError(
+                    "station $(s.name) declares rounds under the " *
+                    "$(s.discipline.name) discipline; round service requires the " *
+                    "non-preemptive :back-insert FCFS discipline (check C12)",
+                ),
+            )
+        end
+        s.batching === nothing || throw(
+            ArgumentError(
+                "station $(s.name) declares both rounds and batching; the round " *
+                "policy owns batch formation (check C12)",
+            ),
+        )
+        s.servers == 1 || throw(
+            ArgumentError(
+                "station $(s.name) declares rounds with servers = $(s.servers); " *
+                "the round clock is the station's single server, so rounds fixes " *
+                "servers = 1 (check C12)",
+            ),
+        )
     end
     return nothing
 end
